@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flare Wallet Transaction Exporter</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            text-align: center;
+        }
+
+        .header {
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+            text-align: left;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            font-size: 1em;
+            transition: all 0.3s ease;
+            background: #f8f9fa;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .loading {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .success {
+            background: #efe;
+            color: #3c3;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .progress-section { margin-top: 20px; text-align: left; }
+        .progress-row { margin: 10px 0; }
+        .progress-label { font-weight: 600; margin-bottom: 6px; }
+        .progress-bar-wrap { background: #edf2f7; border-radius: 8px; overflow: hidden; height: 14px; }
+        .progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #667eea, #764ba2); transition: width 0.3s ease; }
+        .counts { margin-top: 8px; font-size: 0.95em; color: #444; display: flex; gap: 8px; flex-wrap: wrap; }
+        .count-badge { background: #f8f9fa; border: 1px solid #e1e5e9; border-radius: 999px; padding: 4px 8px; }
+
+        .info-box {
+            background: #f0f8ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: left;
+        }
+
+        .info-box h3 {
+            color: #0066cc;
+            margin-bottom: 10px;
+        }
+
+        .info-box ul {
+            color: #666;
+            padding-left: 20px;
+        }
+        
+        .health {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 0.9em;
+            font-weight: 600;
+            border: 1px solid #e1e5e9;
+            background: #f8f9fa;
+            color: #333;
+            width: fit-content;
+        }
+
+        .dot { width: 10px; height: 10px; border-radius: 50%; }
+        .ok { background: #16a34a; }
+        .degraded { background: #f59e0b; }
+        .down { background: #dc2626; }
+
+        .info-box li {
+            margin-bottom: 5px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            font-size: 1em;
+            color: #333;
+            font-weight: 500;
+            position: relative;
+            padding-left: 35px;
+            user-select: none;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            position: absolute;
+            opacity: 0;
+            cursor: pointer;
+            height: 0;
+            width: 0;
+        }
+
+        .checkmark {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 20px;
+            width: 20px;
+            background-color: #f8f9fa;
+            border: 2px solid #e1e5e9;
+            border-radius: 6px;
+            transition: all 0.3s ease;
+        }
+
+        .checkbox-label:hover input ~ .checkmark {
+            background-color: #f0f8ff;
+            border-color: #667eea;
+        }
+
+        .checkbox-label input:checked ~ .checkmark {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border-color: #667eea;
+        }
+
+        .checkmark:after {
+            content: "";
+            position: absolute;
+            display: none;
+        }
+
+        .checkbox-label input:checked ~ .checkmark:after {
+            display: block;
+        }
+
+        .checkbox-label .checkmark:after {
+            left: 6px;
+            top: 2px;
+            width: 6px;
+            height: 10px;
+            border: solid white;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .checkbox-group {
+                gap: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Flare Wallet Transaction Exporter</h1>
+            <p>Analyze your DeFi transactions and export them to CoinTracking.info format</p>
+        </div>
+
+        <div class="info-box">
+            <h3>📋 Supported Networks & Protocols</h3>
+            <div id="healthPanel" class="health" aria-live="polite"></div>
+            <ul>
+                <li><strong>Flare Network:</strong> Native staking, delegation to FTSO providers</li>
+                <li><strong>Arbitrum:</strong> Aave V3, OpenOcean, SparkDEX V3, Kinetic Market</li>
+                <li><strong>Export Format:</strong> CoinTracking.info compatible CSV</li>
+            </ul>
+        </div>
+
+        <form id="transactionForm">
+            <div class="form-group">
+                <label for="walletAddress">Wallet Address:</label>
+                <input 
+                    type="text" 
+                    id="walletAddress" 
+                    name="walletAddress" 
+                    placeholder="0x..." 
+                    value="0xb3a2f25d7956f96703c9ed3ce6ea25e4d47295d3"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label>Networks:</label>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="network_arbitrum" name="network" value="arbitrum" checked>
+                        <span class="checkmark"></span>
+                        Arbitrum
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="network_flare" name="network" value="flare" checked>
+                        <span class="checkmark"></span>
+                        Flare Network
+                    </label>
+                </div>
+            </div>
+
+            <button type="submit" class="btn" id="submitBtn">
+                📊 Generate & Download CSV
+            </button>
+        </form>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Analyzing transactions and generating CSV...</p>
+            <p id="progress-text">This may take up to 60 seconds for large transaction histories...</p>
+        </div>
+
+        <!-- Network summary: shows transaction counts and token balances per network -->
+        <div class="info-box" id="networkSummary" style="display:none; text-align:left;">
+            <h3>Network Summary</h3>
+            <div id="networkSummaryContainer"></div>
+        </div>
+
+        <div class="progress-section" id="progressSection" style="display:none;">
+            <div id="progressContainer"></div>
+            <div style="margin-top: 12px; display:flex; gap: 10px;">
+                <button type="button" class="btn" id="downloadBtn" disabled>⬇️ Download CSV</button>
+                <button type="button" class="btn" id="cancelBtn">✖️ Cancel</button>
+            </div>
+        </div>
+
+        <div class="error" id="error"></div>
+        <div class="success" id="success"></div>
+    </div>
+
+    <script>
+        document.getElementById('transactionForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const walletAddress = document.getElementById('walletAddress').value.trim();
+            const submitBtn = document.getElementById('submitBtn');
+            const loading = document.getElementById('loading');
+            const error = document.getElementById('error');
+            const success = document.getElementById('success');
+            const progressSection = document.getElementById('progressSection');
+            const progressContainer = document.getElementById('progressContainer');
+            const downloadBtn = document.getElementById('downloadBtn');
+            
+            // Get selected networks
+            const selectedNetworks = [];
+            const networkCheckboxes = document.querySelectorAll('input[name="network"]:checked');
+            networkCheckboxes.forEach(checkbox => {
+                selectedNetworks.push(checkbox.value);
+            });
+            
+            // Hide previous messages
+            error.style.display = 'none';
+            success.style.display = 'none';
+            
+            // Validate wallet address
+            if (!walletAddress.startsWith('0x') || walletAddress.length !== 42) {
+                showError('Please enter a valid Ethereum wallet address (0x...)');
+                return;
+            }
+            
+            // Validate network selection
+            if (selectedNetworks.length === 0) {
+                showError('Please select at least one network');
+                return;
+            }
+            
+            // Show loading state
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Processing...';
+            loading.style.display = 'block';
+            
+            try {
+                // Start async job
+                const startRes = await fetch('/start_job', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ wallet_address: walletAddress, networks: selectedNetworks })
+                });
+                if (!startRes.ok) {
+                    const err = await startRes.json();
+                    throw new Error(err.error || 'Failed to start job');
+                }
+                const { job_id } = await startRes.json();
+                progressSection.style.display = 'block';
+                progressContainer.innerHTML = '';
+                downloadBtn.disabled = true;
+
+                // Build progress rows per network
+                selectedNetworks.forEach(n => {
+                    const row = document.createElement('div');
+                    row.className = 'progress-row';
+                    row.innerHTML = `
+                        <div class="progress-label">${n.toUpperCase()} <span id="label-${n}"></span></div>
+                        <div class="progress-bar-wrap"><div class="progress-bar" id="bar-${n}"></div></div>
+                        <div class="counts" id="counts-${n}"></div>
+                    `;
+                    progressContainer.appendChild(row);
+                });
+
+                // Clear and show network summary area
+                const networkSummary = document.getElementById('networkSummary');
+                const networkSummaryContainer = document.getElementById('networkSummaryContainer');
+                networkSummaryContainer.innerHTML = '';
+                networkSummary.style.display = 'block';
+
+                async function fetchAndRenderSummary(n) {
+                    try {
+                        const sres = await fetch(`/network_summary/${n}/${walletAddress}`, { cache: 'no-store' });
+                        if (!sres.ok) return;
+                        const data = await sres.json();
+                        // Ensure a single network card exists (create placeholder if needed)
+                        const cardId = `network-card-${n}`;
+                        let card = document.getElementById(cardId);
+                            if (!card) {
+                            card = document.createElement('div');
+                            card.id = cardId;
+                            card.className = 'info-box';
+                            card.style.marginBottom = '12px';
+                            // placeholder header while loading (includes network logo)
+                            const logoSrc = `/static/network_logos/${n}.svg`;
+                            card.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><div style=\"display:flex;align-items:center;gap:10px\"><img src=\"${logoSrc}\" alt=\"${n}\" style=\"width:32px;height:32px;border-radius:6px;object-fit:cover\"/><strong>${n.toUpperCase()}</strong></div><span>...</span></div><div style="margin-top:8px;">Loading...</div>`;
+                            networkSummaryContainer.appendChild(card);
+                        }
+                                                // Populate/update header and body with USD values
+                                                // Determine which source was used to compute transaction_count for display
+                                                const txlistCount = Number(data.txlist_count || 0);
+                                                const tokentxCount = Number(data.tokentx_unique_count || 0);
+                                                let sourceUsed = 'tokentx';
+                                                if (txlistCount && txlistCount === Number(data.transaction_count)) sourceUsed = 'txlist';
+                                                else if (txlistCount && txlistCount > tokentxCount) sourceUsed = 'txlist';
+
+                                                const pagesMeta = data.tokentx_pages || {};
+                                                const pagesInfo = `pages main:${pagesMeta.main||0} fallback:${pagesMeta.fallback||0}`;
+                                                const fallbackFlag = data.tokentx_used_fallback ? ' (fallback used)' : '';
+
+                                                const headerHtml = `<div style="display:flex;justify-content:space-between;align-items:center"><div><strong>${n.toUpperCase()}</strong><div style="font-size:0.9em;color:#666">${data.transaction_count} tx • ${data.token_count} tokens <span style=\"font-weight:600;margin-left:8px;\">(source: ${sourceUsed})</span></div><div style="font-size:0.85em;color:#888;margin-top:4px">txlist: ${txlistCount} • tokentx_unique: ${tokentxCount} • ${pagesInfo}${fallbackFlag}</div></div><div></div></div>`;
+                                                let bodyHtml = '';
+
+                                                if (Array.isArray(data.tokens) && data.tokens.length) {
+                                                        // build token rows and compute an overall total per network
+                                                        const tokensHtml = data.tokens.map(t => {
+                                                                const contractHex = (t.contract || '').replace(/0x/i, '').toUpperCase();
+                                                                const logoUrl = `/token_icon/${n}/${t.contract.replace(/0x/i, '')}`;
+                                                                const qty = Number(t.quantity).toLocaleString(undefined, {maximumFractionDigits:6});
+                                                                const usd = Number(t.value_usd || 0).toLocaleString(undefined, {maximumFractionDigits:2});
+                                                                // price source badge: 'coingecko' -> CG, 'heuristic' -> H, otherwise dash
+                                                                const psrc = (t.price_source || 'none');
+                                                                const badge = psrc === 'coingecko' ? `<span style="background:#e6f4ff;color:#0366d6;padding:2px 6px;border-radius:6px;font-size:0.75em;margin-left:8px">CG</span>` : (psrc === 'heuristic' ? `<span style="background:#fff7e6;color:#b76b00;padding:2px 6px;border-radius:6px;font-size:0.75em;margin-left:8px">H</span>` : `<span style="background:#f3f4f6;color:#6b7280;padding:2px 6px;border-radius:6px;font-size:0.75em;margin-left:8px">—</span>`);
+                                                                return `
+                                                                        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f1f1f1;align-items:center;">
+                                                                            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                                                                                <img src="${logoUrl}" onerror="this.style.display='none'" alt="" style="width:28px;height:28px;border-radius:6px;object-fit:cover;"/>
+                                                                                <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;">
+                                                                                    <strong style="display:block">${t.symbol || t.contract} ${badge}</strong>
+                                                                                    <div style="font-size:0.9em;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px">${t.name || ''}</div>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div style="text-align:right;min-width:120px">${qty} <div style="font-size:0.85em;color:#666">$${usd}</div></div>
+                                                                        </div>
+                                                                `;
+                                                        }).join('');
+
+                                                        const networkTotalRaw = Number(data.network_total_usd || 0);
+                                                        const networkTotal = networkTotalRaw.toLocaleString(undefined, {maximumFractionDigits:2});
+                                                        bodyHtml = `<div style="margin-top:8px">${tokensHtml}<div style="padding-top:8px;font-weight:700;text-align:right">Network Total: $${networkTotal}</div></div>`;
+                                                } else {
+                                                        bodyHtml = '<div style="margin-top:8px">No token transfers found.</div>';
+                                                }
+
+                                                card.innerHTML = headerHtml + bodyHtml;
+                                                // Store numeric network total on the card element for reliable summation
+                                                // Keep an unformatted plain numeric string so summation is deterministic
+                                                const networkTotalValue = Number(data.network_total_usd) || 0;
+                                                card.dataset.networkTotal = String(networkTotalValue);
+
+                                                // Update overall portfolio total display (sum of network totals)
+                                                const overallElId = 'portfolio-total-usd';
+                                                let overallEl = document.getElementById(overallElId);
+                                                if (!overallEl) {
+                                                        overallEl = document.createElement('div');
+                                                        overallEl.id = overallElId;
+                                                        overallEl.style.marginTop = '12px';
+                                                        overallEl.style.textAlign = 'right';
+                                                        overallEl.style.fontWeight = '800';
+                                                        networkSummaryContainer.parentElement.insertBefore(overallEl, networkSummaryContainer.nextSibling);
+                                                }
+
+                                    // compute sum from numeric data attributes on visible network cards
+                                    const netCards = document.querySelectorAll('[id^="network-card-"]');
+                                    let sum = 0;
+                                    netCards.forEach(c => {
+                                        try {
+                                            // defensively strip any non-numeric characters (commas, $ signs) then parse
+                                            const raw = String(c.dataset.networkTotal || '0').replace(/[^0-9.-]+/g, '');
+                                            const v = parseFloat(raw || '0');
+                                            if (!Number.isNaN(v)) sum += v;
+                                        } catch (e) {
+                                            // ignore malformed values
+                                        }
+                                    });
+                                    overallEl.textContent = `Portfolio Total: $${sum.toLocaleString(undefined, {maximumFractionDigits:2})}`;
+                    } catch (e) {
+                        console.error('summary fetch error', e);
+                    }
+                }
+
+                // Fetch summaries initially
+                selectedNetworks.forEach(n => fetchAndRenderSummary(n));
+
+                // Render a small legend under the network summary container (once)
+                (function renderLegendOnce(){
+                    if (document.getElementById('diagnostic-legend')) return;
+                    const legend = document.createElement('div');
+                    legend.id = 'diagnostic-legend';
+                    legend.style.marginTop = '12px';
+                    legend.style.fontSize = '0.9em';
+                    legend.style.color = '#444';
+                    legend.innerHTML = `<strong>Legend:</strong> <span style="margin-left:8px">CG = CoinGecko price</span> <span style="margin-left:8px">H = heuristic price</span> <span style="margin-left:8px">— = no price</span> <span style="margin-left:12px">Click network header to toggle details</span>`;
+                    networkSummaryContainer.parentElement.insertBefore(legend, networkSummaryContainer.nextSibling);
+                })();
+
+                // Attach interactions after rendering each card (toggle details on header click)
+                function attachCardInteractions(n) {
+                    const card = document.getElementById(`network-card-${n}`);
+                    if (!card) return;
+                    const hdr = card.querySelector('div');
+                    if (!hdr) return;
+                    hdr.style.cursor = 'pointer';
+                    let details = card.querySelector('.network-diagnostics');
+                    if (!details) {
+                        details = document.createElement('div');
+                        details.className = 'network-diagnostics';
+                        details.style.marginTop = '8px';
+                        // Pull diagnostics line from the card header if available
+                        const diagText = card.innerText.split('\n').slice(1,2).join('') || '';
+                        details.innerHTML = `<div style="font-size:0.9em;color:#444">Detailed diagnostics:<br/>${diagText}</div>`;
+                        details.style.display = 'none';
+                        card.appendChild(details);
+                    }
+                    hdr.addEventListener('click', () => { details.style.display = details.style.display === 'none' ? 'block' : 'none'; });
+                    // Ensure header toggling is idempotent if attached multiple times
+                }
+
+                // Hook interactions shortly after initial render
+                setTimeout(()=>{ selectedNetworks.forEach(n => attachCardInteractions(n)); }, 100);
+
+                // Poll status
+                const poll = setInterval(async () => {
+                    try {
+                        const stRes = await fetch(`/job_status/${job_id}`, { cache: 'no-store' });
+                        if (!stRes.ok) throw new Error('status error');
+                        const data = await stRes.json();
+                        const progress = data.progress || {};
+                        const protocolCounts = data.protocol_counts || {};
+
+                        selectedNetworks.forEach(n => {
+                            const p = progress[n] || { total: 0, processed: 0 };
+                            const total = p.total || 0;
+                            const processed = p.processed || 0;
+                            const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+                            const bar = document.getElementById(`bar-${n}`);
+                            const label = document.getElementById(`label-${n}`);
+                            bar.style.width = percent + '%';
+                            label.textContent = `(${processed}/${total}) ${percent}%`;
+
+                            const countsEl = document.getElementById(`counts-${n}`);
+                            const counts = protocolCounts[n] || {};
+                            countsEl.innerHTML = Object.keys(counts).map(k => `<span class="count-badge">${k}: ${counts[k]}</span>`).join(' ');
+                        });
+
+                        if (data.status === 'completed') {
+                            clearInterval(poll);
+                            downloadBtn.disabled = false;
+                            downloadBtn.onclick = () => { window.location.href = `/download/${job_id}`; };
+                            showSuccess('Processing completed. You can download the CSV now.');
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = '📊 Generate & Download CSV';
+                            loading.style.display = 'none';
+                            // Refresh network summaries on completion
+                            selectedNetworks.forEach(n => fetchAndRenderSummary(n));
+                        }
+                        if (data.status === 'failed') {
+                            clearInterval(poll);
+                            showError(data.error || 'Job failed');
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = '📊 Generate & Download CSV';
+                            loading.style.display = 'none';
+                        }
+                    } catch (e) {
+                        console.error('poll error', e);
+                    }
+                }, 1500);
+            } catch (err) {
+                console.error('Error:', err);
+                showError(err.message || 'Failed to start processing');
+                submitBtn.disabled = false;
+                submitBtn.textContent = '📊 Generate & Download CSV';
+                loading.style.display = 'none';
+            }
+        });
+        
+        function showError(message) {
+            const error = document.getElementById('error');
+            error.textContent = message;
+            error.style.display = 'block';
+        }
+        
+        function showSuccess(message) {
+            const success = document.getElementById('success');
+            success.textContent = message;
+            success.style.display = 'block';
+        }
+        
+        // Auto-focus on wallet address input
+        document.getElementById('walletAddress').focus();
+
+        // Health panel logic
+        const healthPanel = document.getElementById('healthPanel');
+
+        function statusClass(ok) {
+            return ok ? 'ok' : 'down';
+        }
+
+        function renderHealth(data) {
+            const checks = data.checks || {};
+            const items = [];
+
+            function badge(label, ok, latency) {
+                const state = ok ? 'OK' : 'DOWN';
+                const cls = ok ? 'ok' : 'down';
+                const lat = (latency || latency === 0) ? `${latency} ms` : 'n/a';
+                return `<span class="badge"><span class="dot ${cls}"></span>${label}: ${state} (${lat})</span>`;
+            }
+
+            const arb = checks.arbitrum || { explorer: {}, rpc: {} };
+            items.push(badge('Arbitrum Explorer', !!arb.explorer.ok, arb.explorer.latency_ms));
+            items.push(badge('Arbitrum RPC', !!arb.rpc.ok, arb.rpc.latency_ms));
+
+            const flr = checks.flare || { explorer: {}, rpc: {} };
+            items.push(badge('Flare Explorer', !!flr.explorer.ok, flr.explorer.latency_ms));
+            items.push(badge('Flare RPC', !!flr.rpc.ok, flr.rpc.latency_ms));
+
+            const overallCls = data.status === 'ok' ? 'ok' : 'degraded';
+            const overallText = data.status === 'ok' ? 'ALL GOOD' : 'DEGRADED';
+            items.unshift(`<span class="badge"><span class="dot ${overallCls}"></span>Overall: ${overallText}</span>`);
+
+            healthPanel.innerHTML = items.join(' ');
+        }
+
+        async function fetchHealth() {
+            try {
+                const res = await fetch('/health', { cache: 'no-store' });
+                const data = await res.json();
+                renderHealth(data);
+            } catch (e) {
+                healthPanel.innerHTML = '<span class="badge"><span class="dot down"></span>Health: DOWN</span>';
+            }
+        }
+
+        fetchHealth();
+        setInterval(fetchHealth, 15000);
+    </script>
+</body>
+</html>
