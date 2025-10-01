@@ -14,6 +14,7 @@ The PostgreSQL integration has been significantly enhanced with advanced transac
 ### Enhanced Processing Pipeline
 - **Dual-Format Processing**: Every transaction analysis now generates both CSV export AND database storage simultaneously
 - **Real-Time Analytics**: Wallet analysis data is automatically generated and stored during processing
+    
 - **Transaction Normalization**: Raw transaction data is transformed to match database schema requirements
 - **Comprehensive Storage**: Transactions, token transfers, and wallet analytics are all persisted
 
@@ -236,6 +237,26 @@ cursor-app-v2/
 └── __pycache__/             # Python bytecode cache
 ```
 
+## Workspace cleanup
+
+To remove generated Python artifacts (compiled .pyc files and __pycache__ folders) run the helper:
+
+```powershell
+# From the project root (PowerShell)
+.venv\Scripts\Activate.ps1
+python scripts/cleanup_workspace.py
+```
+
+You can also run this as a local pre-commit hook (manual stage) after installing pre-commit:
+
+```powershell
+pip install pre-commit
+pre-commit install --hook-type manual
+# Run the hook interactively
+pre-commit run cleanup-workspace --manual
+```
+
+
 ## Enhanced CSV Export Format
 
 The exported CSV follows CoinTracking.info "Custom" import format with extensive enhancements:
@@ -396,6 +417,29 @@ Located in the `etl/` folder:
 - **`07_etl_kinetic.sql`** - Kinetic Market data
 - **`09_etl_ftso.sql`** - Flare FTSO oracle data
 - **`10_amount_scaling_helpers.sql`** - Token amount utilities
+
+## Production Migration Guidance
+
+A stricter, fail-fast Alembic migration is provided for production environments where you prefer migrations to fail rather than attempt best-effort conversions.
+
+- File: `alembic/versions/20251001_make_timestamptz_strict.py`
+- Purpose: Convert existing timestamp columns to `timestamptz` using `AT TIME ZONE 'UTC'` and fail immediately if any conversion statement errors.
+
+When to run:
+- Run this in a controlled staging environment first. Ensure you have a full database backup or snapshot.
+- Use the included GitHub Actions guarded job (workflow input `run_strict_migration`) to run it in CI when you want the strict conversion applied.
+
+How to run locally:
+
+```powershell
+# Activate venv
+.venv\Scripts\Activate.ps1
+
+# Run the strict migration (will raise on failure)
+python -m alembic upgrade 20251001_make_timestamptz_strict
+```
+
+If conversion fails, restore from backup and investigate problematic rows or columns before retrying.
 
 ### Running ETL Jobs
 

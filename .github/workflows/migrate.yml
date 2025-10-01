@@ -1,0 +1,71 @@
+name: DB Migrations (preflight + apply)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_strict_migration:
+        description: 'Run strict timestamptz migration (fail-fast)'
+        required: false
+        default: 'false'
+  push:
+    branches: [ main ]
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    env:
+      # Provide DATABASE_URL as a repository secret in Settings -> Secrets
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run preflight timestamptz check
+        run: |
+          python -c "import sys; sys.path.insert(0, '$(pwd)'); import scripts.preflight_timestamptz_check as p; sys.exit(p.main())"
+
+      - name: Apply Alembic migrations
+        run: |
+          # Fail fast: do not run if preflight failed
+          python -m alembic upgrade head
+
+      - name: Migration complete
+        run: echo "Migrations applied"
+
+  strict_migration:
+    runs-on: ubuntu-latest
+    needs: migrate
+    if: ${{ github.event.inputs.run_strict_migration == 'true' || (github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.run_strict_migration == 'true') }}
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run strict timestamptz migration (fail-fast)
+        run: |
+          # This runs the strict Alembic revision that will fail if any ALTER TABLE fails.
+          python -m alembic upgrade 20251001_make_timestamptz_strict
+
+      - name: Strict migration complete
+        run: echo "Strict migration applied"

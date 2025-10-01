@@ -6,7 +6,7 @@ import requests
 import json
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 # from web3 import Web3  # Removed to avoid installation issues
 # import pandas as pd  # Removed to avoid installation issues
 from typing import Dict, List, Any, Optional, Tuple
@@ -167,6 +167,36 @@ def _fail_job(job_id: str, error_message: str):
 def prepare_transaction_for_db(tx: Dict, defi_analysis: Dict, network: str, wallet_address: str) -> Dict[str, Any]:
     """Prepare raw transaction data for database storage"""
     try:
+        # Normalize incoming transaction keys to handle CSV headers or API payloads
+        def _norm_key(d, *candidates):
+            for c in candidates:
+                if c in d and d[c] not in (None, ''):
+                    return d[c]
+            return None
+
+        # Common header/key mappings from CSV exports to internal keys
+        mapped = {}
+        mapped['hash'] = _norm_key(tx, 'hash', 'Transaction Hash', 'transaction_hash', 'txHash') or ''
+        mapped['blockNumber'] = _norm_key(tx, 'blockNumber', 'Blockno', 'block_number') or tx.get('blockNumber') or 0
+        mapped['timeStamp'] = _norm_key(tx, 'timeStamp', 'UnixTimestamp', 'timeStamp') or tx.get('timeStamp') or 0
+        mapped['from'] = (_norm_key(tx, 'from', 'From') or '').lower()
+        mapped['to'] = (_norm_key(tx, 'to', 'To') or '').lower()
+        mapped['contractAddress'] = _norm_key(tx, 'contractAddress', 'ContractAddress', 'contract')
+        mapped['tokenAddress'] = _norm_key(tx, 'tokenAddress', 'TokenAddress')
+        mapped['tokenSymbol'] = _norm_key(tx, 'tokenSymbol', 'TokenSymbol', 'token') or ''
+        mapped['tokenName'] = _norm_key(tx, 'tokenName', 'TokenName') or ''
+        mapped['tokenDecimal'] = _norm_key(tx, 'tokenDecimal', 'TokenDecimal', 'tokenDecimal')
+        mapped['value'] = _norm_key(tx, 'value', 'Value(ETH)', 'Value_IN(ETH)', 'Value_OUT(ETH)') or tx.get('value', '0')
+        # Normalize logs: if logs is a JSON string in CSV, parse it
+        logs_raw = tx.get('logs') if 'logs' in tx else tx.get('Logs') if 'Logs' in tx else tx.get('logs_json') if 'logs_json' in tx else None
+        if isinstance(logs_raw, str) and logs_raw.strip():
+            try:
+                mapped['logs'] = json.loads(logs_raw)
+            except Exception:
+                mapped['logs'] = []
+        else:
+            mapped['logs'] = tx.get('logs') or tx.get('Logs') or []
+
         # Get chain ID from network
         chain_id_map = {
             'arbitrum': 42161,
@@ -175,40 +205,42 @@ def prepare_transaction_for_db(tx: Dict, defi_analysis: Dict, network: str, wall
         }
         chain_id = chain_id_map.get(network, 0)
         
-        # Parse basic transaction data
-        timestamp = int(tx.get('timeStamp', 0))
-        
-        # Prepare the transaction data structure that matches the database schema
+        # Parse basic transaction data (use normalized mapped values when available)
+        try:
+            timestamp = int(mapped.get('timeStamp') or int(tx.get('timeStamp', 0)))
+        except Exception:
+            timestamp = 0
+
         db_tx = {
             'chain_id': chain_id,
-            'hash': tx.get('hash', ''),
-            'blockNumber': int(tx.get('blockNumber', 0)),
+            'hash': mapped.get('hash') or tx.get('hash', ''),
+            'blockNumber': int(mapped.get('blockNumber') or int(tx.get('blockNumber', 0) or 0)),
             'timeStamp': timestamp,
-            'from': tx.get('from', '').lower(),
-            'to': tx.get('to', '').lower(),
-            'value': tx.get('value', '0'),
-            'gasUsed': int(tx.get('gasUsed', 0)),
-            'gasPrice': int(tx.get('gasPrice', 0)),
-            'txreceipt_status': int(tx.get('isError', '0') == '0'),  # Convert to success status
+            'from': (mapped.get('from') or tx.get('from') or '').lower(),
+            'to': (mapped.get('to') or tx.get('to') or '').lower(),
+            'value': mapped.get('value') or tx.get('value', '0'),
+            'gasUsed': int(tx.get('gasUsed', 0) or 0),
+            'gasPrice': int(tx.get('gasPrice', 0) or 0),
+            'txreceipt_status': int(tx.get('isError', '0') == '0') if 'isError' in tx else int(tx.get('txreceipt_status', 1)),
             'input': tx.get('input', ''),
-            'logs': tx.get('logs', []),
+            'logs': mapped.get('logs') or tx.get('logs') or [],
             'protocol': defi_analysis.get('protocol', 'unknown'),
             'action_type': defi_analysis.get('action_type', 'transfer'),
             'token_transfers': []
         }
         
         # Handle token transfers - check if this is a token transfer transaction
-        if tx.get('contractAddress') or tx.get('tokenAddress'):
+        if mapped.get('contractAddress') or mapped.get('tokenAddress') or tx.get('contractAddress') or tx.get('tokenAddress'):
             # This is a token transfer transaction
             token_transfer = {
                 'log_index': 0,
-                'contractAddress': tx.get('contractAddress') or tx.get('tokenAddress', ''),
-                'from': tx.get('from', '').lower(),
-                'to': tx.get('to', '').lower(),
-                'value': tx.get('value', '0'),
-                'tokenSymbol': tx.get('tokenSymbol', ''),
-                'tokenName': tx.get('tokenName', ''),
-                'tokenDecimal': int(tx.get('tokenDecimal', 18)),
+                'contractAddress': (mapped.get('contractAddress') or mapped.get('tokenAddress') or tx.get('contractAddress') or tx.get('tokenAddress') or '').lower(),
+                'from': (mapped.get('from') or tx.get('from', '')).lower(),
+                'to': (mapped.get('to') or tx.get('to', '')).lower(),
+                'value': mapped.get('value') or tx.get('value', '0'),
+                'tokenSymbol': mapped.get('tokenSymbol') or tx.get('tokenSymbol') or '',
+                'tokenName': mapped.get('tokenName') or tx.get('tokenName') or '',
+                'tokenDecimal': int(mapped.get('tokenDecimal') or tx.get('tokenDecimal') or 18),
                 'value_scaled': None,
                 'usd_value': None
             }
@@ -300,8 +332,8 @@ def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict], ne
         
         # Calculate date range
         timestamps = [int(tx.get('timeStamp', 0)) for tx in raw_transactions if tx.get('timeStamp')]
-        first_tx_date = datetime.fromtimestamp(min(timestamps)) if timestamps else datetime.now()
-        last_tx_date = datetime.fromtimestamp(max(timestamps)) if timestamps else datetime.now()
+        first_tx_date = datetime.fromtimestamp(min(timestamps), tz=timezone.utc) if timestamps else datetime.now(timezone.utc)
+        last_tx_date = datetime.fromtimestamp(max(timestamps), tz=timezone.utc) if timestamps else datetime.now(timezone.utc)
         
         return {
             'wallet_address': wallet_address.lower(),
@@ -313,7 +345,7 @@ def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict], ne
             'protocols_used': ','.join(sorted(protocols_used)),
             'first_transaction_date': first_tx_date,
             'last_transaction_date': last_tx_date,
-            'analysis_date': datetime.now(),
+            'analysis_date': datetime.now(timezone.utc),
             'defi_score': min(len(protocols_used) * 10, 100)  # Simple DeFi activity score
         }
         
@@ -327,9 +359,9 @@ def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict], ne
             'total_gas_used': '0',
             'total_gas_cost_wei': '0',
             'protocols_used': '',
-            'first_transaction_date': datetime.now(),
-            'last_transaction_date': datetime.now(),
-            'analysis_date': datetime.now(),
+            'first_transaction_date': datetime.now(timezone.utc),
+            'last_transaction_date': datetime.now(timezone.utc),
+            'analysis_date': datetime.now(timezone.utc),
             'defi_score': 0
         }
 
@@ -479,7 +511,8 @@ def process_job(job_id: str, wallet_address: str, networks: List[str]):
                 job['all_transactions'] = all_raw_transactions
                 # Create wallet analysis
                 try:
-                    wallet_analysis = create_wallet_analysis(wallet_address, networks[0] if networks else 'arbitrum', all_raw_transactions)
+                    # create_wallet_analysis signature: (wallet_address: str, raw_transactions: List[Dict], networks: List[str])
+                    wallet_analysis = create_wallet_analysis(wallet_address, all_raw_transactions, networks)
                     job['wallet_analysis'] = wallet_analysis
                     app.logger.info(f"Generated wallet analysis for {wallet_address}")
                 except Exception as e:

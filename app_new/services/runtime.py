@@ -7,7 +7,8 @@ module when available (lazy import) but provides safe fallbacks so services
 can be imported and unit-tested without starting the whole monolith.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List
+import concurrent.futures
 import importlib
 import logging
 import os
@@ -16,6 +17,8 @@ import time
 import threading
 import requests
 from typing import Optional
+from typing import Tuple
+# ...existing code...
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,365 @@ def get_eth_price(ts: int) -> float:
     return 0.0
 
 
+# Simple price cache and CoinGecko helpers
+PRICE_CACHE: Dict[str, float] = {}
+COINGECKO_BASE = 'https://api.coingecko.com/api/v3'
+COINGECKO_PLATFORM_MAP = {
+    'arbitrum': 'arbitrum-one',
+    'flare': 'flare'
+}
+
+
+def get_token_price_coingecko(contract_address: str, network: str, vs_currency: str = 'usd') -> float:
+    """Fetch token price from CoinGecko by contract address (cached)."""
+    app = _lazy_app()
+    if app and hasattr(app, 'get_token_price_coingecko'):
+        try:
+            return float(app.get_token_price_coingecko(contract_address, network, vs_currency))
+        except Exception:
+            logger.debug('Delegation to app.get_token_price_coingecko failed')
+
+    if not contract_address:
+        return 0.0
+    key = f"price_{contract_address.lower()}_{network}_{vs_currency}"
+    if key in PRICE_CACHE:
+        return PRICE_CACHE[key]
+
+    platform = COINGECKO_PLATFORM_MAP.get(network, 'ethereum')
+    try:
+        url = f"{COINGECKO_BASE}/simple/token_price/{platform}"
+        params = {'contract_addresses': contract_address, 'vs_currencies': vs_currency}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        addr_key = contract_address.lower()
+        if isinstance(data, dict) and addr_key in data and isinstance(data[addr_key], dict):
+            price = float(data[addr_key].get(vs_currency, 0.0) or 0.0)
+            PRICE_CACHE[key] = price
+            return price
+    except Exception:
+        pass
+
+    try:
+        url2 = f"{COINGECKO_BASE}/coins/{platform}/contract/{contract_address}"
+        r2 = requests.get(url2, timeout=10)
+        r2.raise_for_status()
+        jd = r2.json()
+        price = float(jd.get('market_data', {}).get('current_price', {}).get(vs_currency, 0.0) or 0.0)
+        PRICE_CACHE[key] = price
+        return price
+    except Exception:
+        PRICE_CACHE[key] = 0.0
+        return 0.0
+
+
+def get_coingecko_simple_price(coin_id: str, vs_currency: str = 'usd') -> float:
+    app = _lazy_app()
+    if app and hasattr(app, 'get_coingecko_simple_price'):
+        try:
+            return float(app.get_coingecko_simple_price(coin_id, vs_currency))
+        except Exception:
+            logger.debug('Delegation to app.get_coingecko_simple_price failed')
+
+    if not coin_id:
+        return 0.0
+    key = f"coingecko_{coin_id}_{vs_currency}"
+    if key in PRICE_CACHE:
+        return PRICE_CACHE[key]
+    try:
+        url = f"{COINGECKO_BASE}/simple/price"
+        params = {'ids': coin_id, 'vs_currencies': vs_currency}
+        r = requests.get(url, params=params, timeout=8)
+        r.raise_for_status()
+        jd = r.json()
+        price = float(jd.get(coin_id, {}).get(vs_currency, 0.0) or 0.0)
+        PRICE_CACHE[key] = price
+        return price
+    except Exception:
+        PRICE_CACHE[key] = 0.0
+        return 0.0
+
+
+def fetch_prices_for_tokens(tokens: list, network: str, max_workers: int = 8) -> None:
+    """Fetch and attach price_usd, value_usd and price_source into token dicts in-place."""
+    app = _lazy_app()
+    if app and hasattr(app, 'fetch_prices_for_tokens'):
+        try:
+            return app.fetch_prices_for_tokens(tokens, network, max_workers=max_workers)
+        except Exception:
+            logger.debug('Delegation to app.fetch_prices_for_tokens failed')
+
+    def _fetch(contract: str) -> float:
+        try:
+            return get_token_price_coingecko(contract, network)
+        except Exception:
+            return 0.0
+
+    unique_contracts = { (t.get('contract') or '').lower(): t for t in tokens }
+    contracts = list(unique_contracts.keys())
+    results: Dict[str, float] = {}
+    if not contracts:
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_map = { ex.submit(get_token_price_coingecko, c, network): c for c in contracts }
+        for fut in concurrent.futures.as_completed(future_map):
+            c = future_map[fut]
+            try:
+                price = float(fut.result() or 0.0)
+            except Exception:
+                price = 0.0
+            results[c.lower()] = price
+
+    for t in tokens:
+        contract = (t.get('contract') or '').lower()
+        price = results.get(contract, 0.0)
+        qty = float(t.get('quantity') or 0.0)
+        price_source = 'none'
+        if price and price != 0.0:
+            price_source = 'coingecko'
+        if not price or price == 0.0:
+            sym = (t.get('symbol') or '').upper()
+            name = (t.get('name') or '').lower()
+            if 'WETH' in sym or sym == 'ETH' or 'wrapped ether' in name:
+                price = get_coingecko_simple_price('ethereum')
+                price_source = 'heuristic'
+            elif 'WBTC' in sym or 'WRAPPED BITCOIN' in name or sym == 'BTC':
+                price = get_coingecko_simple_price('bitcoin')
+                price_source = 'heuristic'
+            elif sym == 'USDT' or 'tether' in name:
+                price = 1.0
+                price_source = 'heuristic'
+            elif sym == 'USDC' or 'usd coin' in name or 'usdc.e' in name.lower():
+                price = 1.0
+                price_source = 'heuristic'
+            if network == 'flare':
+                if 'WFLR' in sym or sym == 'FLR' or 'wrapped flare' in name or 'wrapped-flare' in name:
+                    price = get_coingecko_simple_price('flare')
+                    price_source = 'heuristic'
+                if ('RFLR' in sym) or ('reward flare' in name) or ('rflr' in name):
+                    price = get_coingecko_simple_price('flare')
+                    price_source = 'heuristic'
+                if 'USDT' in sym or 'USDC' in sym or 'TETHER' in name or 'USD COIN' in name:
+                    price = 1.0
+                    price_source = 'heuristic'
+        t['price_usd'] = float(price)
+        t['value_usd'] = round(qty * price, 6)
+        t['price_source'] = price_source
+
+
+def fetch_transactions_from_explorer(wallet_address: str, network: str, limit: int = 1000, include_token_transfers: bool = True) -> list:
+    """Fetch transactions from explorer APIs or RPCs. Delegates to monolith when available.
+
+    Returns a list of tx dicts. In absence of explorer/RPC access, returns small mock data for tests.
+    """
+    app = _lazy_app()
+    if app and hasattr(app, 'fetch_transactions_from_explorer'):
+        try:
+            return app.fetch_transactions_from_explorer(wallet_address, network, limit=limit, include_token_transfers=include_token_transfers)
+        except Exception:
+            logger.debug('Delegation to app.fetch_transactions_from_explorer failed')
+
+    # Conservative local implementation: prefer Etherscan v2 if configured, else try RPC fallbacks, else return mock
+    try:
+        if network not in NETWORKS:
+            return []
+        # Try Etherscan v2 if available
+        etherscan_base = NETWORKS.get(network, {}).get('etherscan_v2') or NETWORKS.get(network, {}).get('explorer_api')
+        chain_id = NETWORKS.get(network, {}).get('chain_id')
+        collected = []
+        page = 1
+        page_size = 200
+        if etherscan_base:
+            try:
+                while len(collected) < limit:
+                    remaining = limit - len(collected)
+                    offset = min(page_size, remaining)
+                    params = {
+                        'module': 'account',
+                        'action': 'txlist',
+                        'chainid': chain_id,
+                        'address': wallet_address,
+                        'startblock': 0,
+                        'endblock': 99999999,
+                        'page': page,
+                        'offset': offset,
+                        'sort': 'desc'
+                    }
+                    r = requests.get(etherscan_base, params=params, timeout=15)
+                    r.raise_for_status()
+                    data = r.json()
+                    page_txs = data.get('result', []) or []
+                    collected.extend(page_txs)
+                    if len(page_txs) < offset:
+                        break
+                    page += 1
+                return collected[:limit]
+            except Exception:
+                logger.debug('Etherscan v2 fetch failed, falling back to RPC')
+
+        # RPC fallbacks per network
+        if network == 'arbitrum':
+            rpc_res = fetch_from_arbitrum_rpc(wallet_address, limit)
+            if rpc_res:
+                return rpc_res
+            return generate_mock_arbitrum_transactions(wallet_address, limit)
+        elif network == 'flare':
+            rpc_res = fetch_from_flare_rpc(wallet_address, limit)
+            if rpc_res:
+                return rpc_res
+            return generate_mock_flare_transactions(wallet_address, limit)
+        else:
+            return []
+    except Exception:
+        return []
+
+
+def fetch_from_arbitrum_rpc(wallet_address: str, limit: int = 1000) -> list:
+    """Try to scan recent Arbitrum blocks for transactions involving `wallet_address`.
+
+    This is a best-effort lightweight implementation for tests and fallback; prefer monolith delegation in production.
+    """
+    try:
+        rpc_url = NETWORKS.get('arbitrum', {}).get('rpc_url', 'https://arb1.arbitrum.io/rpc')
+        # Get latest block
+        blk = requests.post(rpc_url, json={'jsonrpc':'2.0','method':'eth_blockNumber','params':[],'id':1}, timeout=10)
+        blk.raise_for_status()
+        latest_block = int(blk.json().get('result', '0x0'), 16)
+        start_block = max(0, latest_block - 1000)
+        transactions = []
+        search_blocks = min(500, latest_block - start_block)
+        for i in range(search_blocks):
+            block_num = latest_block - i
+            block_hex = hex(block_num)
+            br = requests.post(rpc_url, json={'jsonrpc':'2.0','method':'eth_getBlockByNumber','params':[block_hex, True],'id':1}, timeout=5)
+            if br.status_code != 200:
+                continue
+            bd = br.json().get('result')
+            if not bd:
+                continue
+            for tx in bd.get('transactions', []):
+                if (tx.get('from','').lower() == wallet_address.lower() or tx.get('to','').lower() == wallet_address.lower()):
+                    formatted_tx = {
+                        'hash': tx.get('hash',''),
+                        'blockNumber': str(block_num),
+                        'timeStamp': str(int(bd.get('timestamp','0x0'), 16)),
+                        'from': tx.get('from',''),
+                        'to': tx.get('to',''),
+                        'value': tx.get('value','0x0'),
+                        'gas': tx.get('gas','0x0'),
+                        'gasPrice': tx.get('gasPrice','0x0'),
+                        'gasUsed': tx.get('gas','0x0'),
+                        'input': tx.get('input','0x'),
+                        'isError': '0',
+                        'txreceipt_status': '1'
+                    }
+                    transactions.append(formatted_tx)
+                    if len(transactions) >= limit:
+                        break
+            if len(transactions) >= limit:
+                break
+            if i % 50 == 0:
+                time.sleep(0.02)
+        return transactions
+    except Exception:
+        return []
+
+
+def fetch_from_flare_rpc(wallet_address: str, limit: int = 1000) -> list:
+    try:
+        rpc_url = NETWORKS.get('flare', {}).get('rpc_url', 'https://flare-api.flare.network/ext/C/rpc')
+        br = requests.post(rpc_url, json={'jsonrpc':'2.0','method':'eth_blockNumber','params':[],'id':1}, timeout=10)
+        br.raise_for_status()
+        latest_block = int(br.json().get('result', '0x0'), 16)
+        start_block = max(0, latest_block - 1000)
+        transactions = []
+        search_blocks = min(500, latest_block - start_block)
+        for i in range(search_blocks):
+            block_num = latest_block - i
+            block_hex = hex(block_num)
+            br2 = requests.post(rpc_url, json={'jsonrpc':'2.0','method':'eth_getBlockByNumber','params':[block_hex, True],'id':1}, timeout=5)
+            if br2.status_code != 200:
+                continue
+            bd = br2.json().get('result')
+            if not bd:
+                continue
+            for tx in bd.get('transactions', []):
+                if (tx.get('from','').lower() == wallet_address.lower() or tx.get('to','').lower() == wallet_address.lower()):
+                    formatted_tx = {
+                        'hash': tx.get('hash',''),
+                        'blockNumber': str(block_num),
+                        'timeStamp': str(int(bd.get('timestamp','0x0'), 16)),
+                        'from': tx.get('from',''),
+                        'to': tx.get('to',''),
+                        'value': tx.get('value','0x0'),
+                        'gas': tx.get('gas','0x0'),
+                        'gasPrice': tx.get('gasPrice','0x0'),
+                        'gasUsed': tx.get('gas','0x0'),
+                        'input': tx.get('input','0x'),
+                        'isError': '0',
+                        'txreceipt_status': '1'
+                    }
+                    transactions.append(formatted_tx)
+                    if len(transactions) >= limit:
+                        break
+            if len(transactions) >= limit:
+                break
+            if i % 50 == 0:
+                time.sleep(0.02)
+        return transactions
+    except Exception:
+        return []
+
+
+def generate_mock_arbitrum_transactions(wallet_address: str, limit: int = 100) -> list:
+    import random
+    import time as _t
+    mock_transactions = []
+    current_time = int(_t.time())
+    for i in range(min(limit, 20)):
+        tx = {
+            'hash': f"0x{'b'*64}",
+            'blockNumber': str(2000000 + i),
+            'timeStamp': str(current_time - (i * 3600)),
+            'from': wallet_address,
+            'to': '0x9876543210987654321098765432109876543210',
+            'value': str(random.randint(1000000000000000000, 10000000000000000000)),
+            'gas': '21000',
+            'gasPrice': '1000000000',
+            'gasUsed': '21000',
+            'input': '0x',
+            'isError': '0',
+            'txreceipt_status': '1'
+        }
+        mock_transactions.append(tx)
+    return mock_transactions
+
+
+def generate_mock_flare_transactions(wallet_address: str, limit: int = 100) -> list:
+    import random
+    import time as _t
+    mock_transactions = []
+    current_time = int(_t.time())
+    for i in range(min(limit, 20)):
+        tx = {
+            'hash': f"0x{'a'*64}",
+            'blockNumber': str(1000000 + i),
+            'timeStamp': str(current_time - (i * 3600)),
+            'from': wallet_address,
+            'to': '0x1234567890123456789012345678901234567890',
+            'value': str(random.randint(1000000000000000000, 10000000000000000000)),
+            'gas': '21000',
+            'gasPrice': '20000000000',
+            'gasUsed': '21000',
+            'input': '0x',
+            'isError': '0',
+            'txreceipt_status': '1'
+        }
+        mock_transactions.append(tx)
+    return mock_transactions
+
+
 # Token metadata TTL and debounce save settings
 _TOKEN_META_TTL = int(os.environ.get('TOKEN_META_CACHE_TTL_SECONDS', str(7 * 24 * 60 * 60)))
 _SAVE_DEBOUNCE_SECONDS = int(os.environ.get('TOKEN_META_CACHE_SAVE_DEBOUNCE', '30'))
@@ -145,6 +507,58 @@ def get_address_info(addr: str, network: str) -> Dict[str, Any]:
         pass
     # Best-effort empty metadata
     return {"platform": "", "token_name": ""}
+
+
+# Explorer helpers (delegation to app when available, otherwise use local explorer module)
+try:
+    from app_new.services import explorer as _explorer_impl
+except Exception:
+    _explorer_impl = None
+
+
+def fetch_token_balances(wallet_address: str, network: str, tokens: List[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    app = _lazy_app()
+    if app and hasattr(app, 'fetch_token_balances'):
+        try:
+            return app.fetch_token_balances(wallet_address, network, tokens)
+        except Exception:
+            logger.debug('Delegation to app.fetch_token_balances failed')
+    if _explorer_impl and hasattr(_explorer_impl, 'fetch_token_balances'):
+        try:
+            return _explorer_impl.fetch_token_balances(wallet_address, network, tokens)
+        except Exception:
+            logger.debug('Local explorer.fetch_token_balances failed')
+    return {}
+
+
+def fetch_token_transfers(wallet_address: str, network: str, limit: int = 1000):
+    app = _lazy_app()
+    if app and hasattr(app, 'fetch_token_transfers'):
+        try:
+            return app.fetch_token_transfers(wallet_address, network, limit=limit)
+        except Exception:
+            logger.debug('Delegation to app.fetch_token_transfers failed')
+    if _explorer_impl and hasattr(_explorer_impl, 'fetch_token_transfers'):
+        try:
+            return _explorer_impl.fetch_token_transfers(wallet_address, network, limit=limit)
+        except Exception:
+            logger.debug('Local explorer.fetch_token_transfers failed')
+    return [], {'pages_main': 0, 'pages_fallback': 0, 'used_fallback': False}
+
+
+def fetch_flare_token_details(wallet_address: str, limit: int = 1000):
+    app = _lazy_app()
+    if app and hasattr(app, 'fetch_flare_token_details'):
+        try:
+            return app.fetch_flare_token_details(wallet_address, limit=limit)
+        except Exception:
+            logger.debug('Delegation to app.fetch_flare_token_details failed')
+    if _explorer_impl and hasattr(_explorer_impl, 'fetch_flare_token_details'):
+        try:
+            return _explorer_impl.fetch_flare_token_details(wallet_address, limit=limit)
+        except Exception:
+            logger.debug('Local explorer.fetch_flare_token_details failed')
+    return []
 
 
 def get_token_meta(addr: str, network: str) -> Dict[str, str]:
@@ -479,30 +893,107 @@ def _save_token_meta_cache_to_disk() -> None:
         logger.debug('Failed to write token meta cache to disk: %s', _TOKEN_META_CACHE_PATH)
 
 
-def abi_decode(data: str) -> Dict[str, Any]:
-    """Lightweight ABI decode helper.
+def _abi_decode_types(types: List[str], data_hex: str) -> List[Any]:
+    """Internal robust ABI decoder: types + data_hex -> list of decoded values."""
+    if not data_hex or data_hex == '0x':
+        return []
 
-    Returns a dict with 'method_signature' (0x...) and 'params' list of hex strings.
-    This is intentionally minimal — full ABI decoding requires type info and
-    external libs, but this helper extracts the method id and raw params for
-    heuristic uses.
+    try:
+        from eth_abi import decode_abi, decode_single
+        hx = data_hex[2:] if data_hex.startswith('0x') else data_hex
+        b = bytes.fromhex(hx)
+        try:
+            if len(types) == 1:
+                val = decode_single(types[0], b)
+                if isinstance(val, (bytes, bytearray)):
+                    try:
+                        s = val.rstrip(b'\x00').decode('utf-8', errors='ignore')
+                        return [s]
+                    except Exception:
+                        return ["0x" + val.hex()]
+                else:
+                    return [val]
+            else:
+                decoded = decode_abi(types, b)
+                out = []
+                for idx, v in enumerate(decoded):
+                    if isinstance(v, (bytes, bytearray)):
+                        try:
+                            s = v.rstrip(b'\x00').decode('utf-8', errors='ignore')
+                            out.append(s)
+                        except Exception:
+                            out.append("0x" + v.hex())
+                    else:
+                        out.append(v)
+                return out
+        except Exception:
+            try:
+                if len(b) >= 32:
+                    offset = int.from_bytes(b[0:32], 'big')
+                    if offset > 0 and len(b) > offset:
+                        decoded = decode_abi(types, b[offset:])
+                        return list(decoded)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Fallback minimal logic
+    try:
+        hx = data_hex[2:] if data_hex.startswith('0x') else data_hex
+        b = bytes.fromhex(hx)
+        if len(types) == 1 and types[0] == 'string':
+            if len(b) >= 64:
+                length = int.from_bytes(b[32:64], 'big')
+                start = 64
+                end = start + length
+                if end <= len(b):
+                    s = b[start:end].decode('utf-8', errors='ignore')
+                    return [s]
+            try:
+                s = b.decode('utf-8', errors='ignore').rstrip('\x00')
+                return [s]
+            except Exception:
+                return ['']
+        elif len(types) == 1 and types[0].startswith('bytes'):
+            b32 = bytes.fromhex(hx[:64])
+            return [b32]
+    except Exception:
+        return []
+
+    return []
+
+
+def abi_decode(*args):
+    """Dispatcher: supports two forms:
+
+    - abi_decode(data_str) -> legacy minimal dict { method_signature, params }
+    - abi_decode(types_list, data_hex) -> robust list of decoded values
     """
-    out: Dict[str, Any] = {"method_signature": "", "params": []}
-    if not data or not isinstance(data, str):
+    # Legacy one-arg form: minimal param extraction
+    if len(args) == 1 and isinstance(args[0], str):
+        data = args[0]
+        out: Dict[str, Any] = {"method_signature": "", "params": []}
+        if not data or not isinstance(data, str):
+            return out
+        data_hex = data[2:] if data.startswith('0x') else data
+        if len(data_hex) < 8:
+            return out
+        out["method_signature"] = "0x" + data_hex[:8]
+        params_hex = []
+        rest = data_hex[8:]
+        for i in range(0, len(rest), 64):
+            word = rest[i:i+64]
+            if word:
+                params_hex.append("0x" + word)
+        out["params"] = params_hex
         return out
-    if data.startswith("0x"):
-        data_hex = data[2:]
-    else:
-        data_hex = data
-    if len(data_hex) < 8:
-        return out
-    out["method_signature"] = "0x" + data_hex[:8]
-    params_hex = []
-    rest = data_hex[8:]
-    # split into 32-byte (64 hex char) words
-    for i in range(0, len(rest), 64):
-        word = rest[i:i+64]
-        if word:
-            params_hex.append("0x" + word)
-    out["params"] = params_hex
-    return out
+
+    # Two-arg form: types + data_hex
+    if len(args) >= 2 and isinstance(args[0], (list, tuple)) and isinstance(args[1], str):
+        types = list(args[0])
+        data_hex = args[1]
+        return _abi_decode_types(types, data_hex)
+
+    # Unknown usage
+    raise TypeError('abi_decode expects either (data_str) or (types_list, data_hex)')

@@ -1,0 +1,13 @@
+openapi: 3.0.0
+info:
+  title: wallet2cointracking - Timestamps
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    TimestampExample:
+      type: string
+      format: date-time
+      description: |
+        ISO 8601 timestamp in UTC. All timestamps returned by the API are timezone-aware and use UTC (Z suffix).
+      example: '2025-10-01T12:34:56Z'

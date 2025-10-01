@@ -302,6 +302,26 @@ For schema changes, modify the SQL files in `etl/sql/` and re-run:
 python migrate_db.py
 ```
 
+### Alembic migrations
+
+This project also includes Alembic migrations for schema changes that must be managed explicitly (for example, creating unique indexes used by application upserts).
+
+To run the included migration that creates unique indexes for upsert support:
+
+```powershell
+.# activate your venv
+.\.venv\Scripts\Activate.ps1
+python -m alembic upgrade head
+```
+
+If you need to create a new revision:
+
+```powershell
+python -m alembic revision -m "describe change" --autogenerate
+```
+
+Note: Alembic is configured to pick up the database URL from the application's `DatabaseConfig` at runtime via `alembic/env.py`.
+
 ### Adding New Protocols
 
 1. Update `defi_config.py` with protocol addresses and methods

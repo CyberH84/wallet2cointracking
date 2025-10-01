@@ -15,7 +15,7 @@ address info) are required. Keep signatures stable for an incremental
 migration from the monolith.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, TypedDict
 import concurrent.futures
 import importlib
@@ -172,8 +172,8 @@ def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict[str,
                 protocols_used.add(tx['protocol'])
 
         timestamps = [int(tx.get('timeStamp', 0)) for tx in raw_transactions if tx.get('timeStamp')]
-        first_tx_date = datetime.fromtimestamp(min(timestamps)) if timestamps else datetime.now()
-        last_tx_date = datetime.fromtimestamp(max(timestamps)) if timestamps else datetime.now()
+        first_tx_date = datetime.fromtimestamp(min(timestamps), tz=timezone.utc) if timestamps else datetime.now(timezone.utc)
+        last_tx_date = datetime.fromtimestamp(max(timestamps), tz=timezone.utc) if timestamps else datetime.now(timezone.utc)
 
         return {
             'wallet_address': wallet_address.lower(),
@@ -185,7 +185,7 @@ def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict[str,
             'protocols_used': ','.join(sorted(protocols_used)),
             'first_transaction_date': first_tx_date,
             'last_transaction_date': last_tx_date,
-            'analysis_date': datetime.now(),
+            'analysis_date': datetime.now(timezone.utc),
             'defi_score': min(len(protocols_used) * 10, 100),
         }
     except Exception:
@@ -198,9 +198,9 @@ def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict[str,
             'total_gas_used': '0',
             'total_gas_cost_wei': '0',
             'protocols_used': '',
-            'first_transaction_date': datetime.now(),
-            'last_transaction_date': datetime.now(),
-            'analysis_date': datetime.now(),
+            'first_transaction_date': datetime.now(timezone.utc),
+            'last_transaction_date': datetime.now(timezone.utc),
+            'analysis_date': datetime.now(timezone.utc),
             'defi_score': 0,
         }
 

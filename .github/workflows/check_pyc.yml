@@ -1,0 +1,28 @@
+name: Check for .pyc files
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check-pyc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find .pyc files
+        run: |
+          set -e
+          # List .pyc files excluding the virtualenv and .git directory
+          matches=$(git ls-files --cached --others --exclude-standard | grep -E '\.pyc$' || true)
+          # Also search untracked files (outside gitignore) for safety
+          untracked=$(find . -type f -name '*.pyc' -not -path './.venv/*' -not -path './.git/*' -print || true)
+          echo "git-indexed .pyc files:\n$matches"
+          echo "untracked .pyc files:\n$untracked"
+          if [ -n "$matches" ] || [ -n "$untracked" ]; then
+            echo "Found .pyc files in repository. Please remove them or add patterns to .gitignore.";
+            exit 1
+          fi

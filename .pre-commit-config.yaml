@@ -19,3 +19,10 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+  - repo: local
+    hooks:
+      - id: cleanup-workspace
+        name: cleanup workspace (remove .pyc and __pycache__)
+        entry: python scripts/cleanup_workspace.py
+        language: system
+        stages: [pre-commit]

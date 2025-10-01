@@ -7,16 +7,75 @@ import os
 import logging
 from typing import Optional, Dict, Any, List
 from sqlalchemy import create_engine, text, MetaData, Table, Column, Integer, String, Text, BigInteger, DateTime, Boolean, Numeric, JSON
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from dotenv import load_dotenv
+from decimal import Decimal, getcontext
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Use high precision for Decimal arithmetic to avoid precision loss across conversions
+getcontext().prec = 78
+
+
+def parse_value_to_raw_and_scaled(value, decimals: int):
+    """Parse a value that may be:
+    - an integer/raw string (wei or raw token units)
+    - a decimal/scientific string representing scaled token (e.g. '0.1156' or '2.08e-06')
+    - a hex string (0x...)
+    Returns (raw_int, Decimal(scaled_value)).
+    This is safe to call from other modules/tests.
+    """
+    try:
+        if value is None:
+            return 0, Decimal(0)
+
+        # Already an int
+        if isinstance(value, int):
+            raw = int(value)
+            scaled = Decimal(raw) / (Decimal(10) ** decimals) if decimals is not None else Decimal(raw)
+            return raw, scaled
+
+        s = str(value).strip()
+        if s == '':
+            return 0, Decimal(0)
+
+        # Hex encoded integer
+        if s.startswith('0x') or s.startswith('0X'):
+            try:
+                raw = int(s, 16)
+                scaled = Decimal(raw) / (Decimal(10) ** decimals) if decimals is not None else Decimal(raw)
+                return raw, scaled
+            except Exception:
+                pass
+
+        # If it looks like a decimal/scientific notation -> treat as scaled amount
+        if ('.' in s) or ('e' in s) or ('E' in s):
+            try:
+                dec = Decimal(s)
+                raw = int((dec * (Decimal(10) ** int(decimals or 0))).to_integral_value())
+                return raw, dec
+            except Exception:
+                pass
+
+        # Otherwise try integer parse
+        try:
+            raw = int(s)
+            scaled = Decimal(raw) / (Decimal(10) ** int(decimals or 0)) if decimals is not None else Decimal(raw)
+            return raw, scaled
+        except Exception:
+            # Fallback to Decimal parsing
+            dec = Decimal(s)
+            raw = int((dec * (Decimal(10) ** int(decimals or 0))).to_integral_value())
+            return raw, dec
+
+    except Exception as e:
+        logger.warning(f"Failed to parse value '{value}' with decimals={decimals}: {e}")
+        return 0, Decimal(0)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -121,7 +180,7 @@ class EthereumTransaction(Base):
     chain_id = Column(Integer, nullable=False)
     tx_hash = Column(String(66), nullable=False, unique=True)
     block_number = Column(BigInteger, nullable=False)
-    block_time = Column(DateTime, nullable=False)
+    block_time = Column(DateTime(timezone=True), nullable=False)
     from_address = Column(String(42), nullable=False)
     to_address = Column(String(42))
     value = Column(Numeric(78, 0), nullable=False)
@@ -132,7 +191,7 @@ class EthereumTransaction(Base):
     logs = Column(JSON)
     protocol = Column(String(50))
     action_type = Column(String(50))
-    processed_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     def __repr__(self):
         return f"<EthereumTransaction(tx_hash='{self.tx_hash}', chain_id={self.chain_id})>"
@@ -146,7 +205,7 @@ class TokenTransfer(Base):
     tx_hash = Column(String(66), nullable=False)
     log_index = Column(Integer, nullable=False)
     block_number = Column(BigInteger, nullable=False)
-    block_time = Column(DateTime, nullable=False)
+    block_time = Column(DateTime(timezone=True), nullable=False)
     token_address = Column(String(42), nullable=False)
     from_address = Column(String(42), nullable=False)
     to_address = Column(String(42), nullable=False)
@@ -157,7 +216,7 @@ class TokenTransfer(Base):
     token_decimals = Column(Integer)
     usd_value = Column(Numeric(20, 8))
     protocol = Column(String(50))
-    processed_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     def __repr__(self):
         return f"<TokenTransfer(tx_hash='{self.tx_hash}', token='{self.token_symbol}')>"
@@ -169,14 +228,14 @@ class WalletAnalysis(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     wallet_address = Column(String(42), nullable=False)
     chain_id = Column(Integer, nullable=False)
-    analysis_date = Column(DateTime, nullable=False, default=datetime.utcnow)
+    analysis_date = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     total_transactions = Column(Integer, nullable=False)
     defi_transactions = Column(Integer, nullable=False)
     total_volume_usd = Column(Numeric(20, 8))
     protocols_used = Column(JSON)
     token_portfolio = Column(JSON)
     risk_score = Column(Numeric(5, 2))
-    last_activity = Column(DateTime)
+    last_activity = Column(DateTime(timezone=True))
     
     def __repr__(self):
         return f"<WalletAnalysis(wallet='{self.wallet_address}', chain_id={self.chain_id})>"
@@ -191,8 +250,9 @@ class DatabaseManager:
         """Initialize database with schemas and tables"""
         try:
             engine = self.db_config.initialize_engine()
-            
             # Create all tables
+            # NOTE: Unique indexes required for ON CONFLICT upserts are managed via Alembic migrations
+            # and should NOT be created at runtime. Use the migration: alembic upgrade head
             Base.metadata.create_all(bind=engine)
             
             # Initialize ETL schemas if they don't exist
@@ -281,75 +341,204 @@ class DatabaseManager:
     def store_transactions(self, transactions: List[Dict[str, Any]], wallet_analysis: Dict[str, Any] = None) -> bool:
         """Store processed transactions and wallet analysis in database"""
         try:
-            with self.db_config.get_session() as session:
+            engine = self.db_config.initialize_engine()
+            # Prepare batch insert for ethereum_transactions using ON CONFLICT upsert
+            if transactions:
+                tx_params = []
+                tt_params = []
+                # Use module-level Decimal parser
+                # getcontext().prec is already configured at module import
                 for tx_data in transactions:
-                    # Store main transaction
-                    tx = EthereumTransaction(
-                        chain_id=tx_data.get('chain_id'),
-                        tx_hash=tx_data.get('hash'),
-                        block_number=tx_data.get('blockNumber'),
-                        block_time=datetime.fromtimestamp(int(tx_data.get('timeStamp', 0))),
-                        from_address=tx_data.get('from', '').lower(),
-                        to_address=tx_data.get('to', '').lower(),
-                        value=int(tx_data.get('value', 0)),
-                        gas_used=int(tx_data.get('gasUsed', 0)),
-                        gas_price=int(tx_data.get('gasPrice', 0)),
-                        status=int(tx_data.get('txreceipt_status', 1)),
-                        input_data=tx_data.get('input'),
-                        logs=tx_data.get('logs'),
-                        protocol=tx_data.get('protocol'),
-                        action_type=tx_data.get('action_type')
+                    try:
+                        # Parse timestamp as UTC-aware datetime
+                        block_time = datetime.fromtimestamp(int(tx_data.get('timeStamp', 0)), tz=timezone.utc)
+                    except Exception:
+                        block_time = datetime.now(timezone.utc)
+
+                    processed_at = datetime.now(timezone.utc)
+
+                    # Convert transaction value to raw integer (wei) and scaled Decimal (ETH)
+                    try:
+                        tx_value_raw, tx_value_scaled = parse_value_to_raw_and_scaled(tx_data.get('value'), 18)
+                    except Exception:
+                        tx_value_raw, tx_value_scaled = 0, Decimal(0)
+
+                    tx_params.append({
+                        'chain_id': tx_data.get('chain_id'),
+                        'tx_hash': tx_data.get('hash'),
+                        'block_number': tx_data.get('blockNumber'),
+                        'block_time': block_time,
+                        'from_address': (tx_data.get('from') or '').lower(),
+                        'to_address': (tx_data.get('to') or '').lower(),
+                        'value': tx_value_raw,
+                        'gas_used': int(tx_data.get('gasUsed') or 0),
+                        'gas_price': int(tx_data.get('gasPrice') or 0),
+                        'status': int(tx_data.get('txreceipt_status') or 1),
+                        'input_data': tx_data.get('input'),
+                        'logs': json.dumps(tx_data.get('logs') or []),
+                        'protocol': tx_data.get('protocol'),
+                        'action_type': tx_data.get('action_type'),
+                        'processed_at': processed_at
+                    })
+
+                    # Flatten token transfers
+                    for transfer in tx_data.get('token_transfers', []):
+                        try:
+                            # Determine token decimals (fallback to 18)
+
+                            token_decimals = int(transfer.get('tokenDecimal') or transfer.get('token_decimals') or 18)
+
+                            # Parse transfer value which may be scaled decimal (e.g. '0.1156'), scientific, hex, or raw integer string
+                            raw_val, scaled_val = parse_value_to_raw_and_scaled(transfer.get('value'), token_decimals)
+
+                            tt_params.append({
+                                'chain_id': tx_data.get('chain_id'),
+                                'tx_hash': tx_data.get('hash'),
+                                'log_index': int(transfer.get('log_index', 0)),
+                                'block_number': tx_data.get('blockNumber'),
+                                'block_time': block_time,
+                                'token_address': (transfer.get('contractAddress') or transfer.get('tokenAddress') or '').lower(),
+                                'from_address': (transfer.get('from') or '').lower(),
+                                'to_address': (transfer.get('to') or '').lower(),
+                                'value_raw': raw_val,
+                                'value_scaled': scaled_val,
+                                'token_symbol': transfer.get('tokenSymbol'),
+                                'token_name': transfer.get('tokenName'),
+                                'token_decimals': token_decimals,
+                                'usd_value': transfer.get('usd_value'),
+                                'protocol': tx_data.get('protocol'),
+                                'processed_at': processed_at
+                            })
+                        except Exception:
+                            logger.exception("Skipping malformed token transfer during DB store")
+                            continue
+
+                # Build SQL for ethereum_transactions upsert
+                eth_sql = text("""
+                INSERT INTO ethereum_transactions (
+                    chain_id, tx_hash, block_number, block_time, from_address, to_address, value,
+                    gas_used, gas_price, status, input_data, logs, protocol, action_type, processed_at
+                ) VALUES (
+                    :chain_id, :tx_hash, :block_number, :block_time, :from_address, :to_address, :value,
+                    :gas_used, :gas_price, :status, :input_data, :logs, :protocol, :action_type, :processed_at
+                )
+                ON CONFLICT (tx_hash) DO UPDATE SET
+                    block_number = EXCLUDED.block_number,
+                    block_time = EXCLUDED.block_time,
+                    from_address = EXCLUDED.from_address,
+                    to_address = EXCLUDED.to_address,
+                    value = EXCLUDED.value,
+                    gas_used = EXCLUDED.gas_used,
+                    gas_price = EXCLUDED.gas_price,
+                    status = EXCLUDED.status,
+                    input_data = EXCLUDED.input_data,
+                    logs = EXCLUDED.logs,
+                    protocol = EXCLUDED.protocol,
+                    action_type = EXCLUDED.action_type,
+                    processed_at = EXCLUDED.processed_at;
+                """)
+
+                # Build SQL for token_transfers upsert (requires unique index on tx_hash, log_index)
+                tt_sql = text("""
+                INSERT INTO token_transfers (
+                    chain_id, tx_hash, log_index, block_number, block_time, token_address,
+                    from_address, to_address, value_raw, value_scaled, token_symbol, token_name,
+                    token_decimals, usd_value, protocol, processed_at
+                ) VALUES (
+                    :chain_id, :tx_hash, :log_index, :block_number, :block_time, :token_address,
+                    :from_address, :to_address, :value_raw, :value_scaled, :token_symbol, :token_name,
+                    :token_decimals, :usd_value, :protocol, :processed_at
+                )
+                ON CONFLICT (tx_hash, log_index) DO UPDATE SET
+                    block_number = EXCLUDED.block_number,
+                    block_time = EXCLUDED.block_time,
+                    token_address = EXCLUDED.token_address,
+                    from_address = EXCLUDED.from_address,
+                    to_address = EXCLUDED.to_address,
+                    value_raw = EXCLUDED.value_raw,
+                    value_scaled = EXCLUDED.value_scaled,
+                    token_symbol = EXCLUDED.token_symbol,
+                    token_name = EXCLUDED.token_name,
+                    token_decimals = EXCLUDED.token_decimals,
+                    usd_value = EXCLUDED.usd_value,
+                    protocol = EXCLUDED.protocol,
+                    processed_at = EXCLUDED.processed_at;
+                """)
+
+                # Execute batch inserts
+                with engine.begin() as conn:
+                    # Unique indexes for ON CONFLICT upserts are managed by Alembic migrations
+                    # (alembic/versions/20251001_create_upsert_indexes.py). Do not create them at
+                    # runtime in production; they were previously created defensively for local
+                    # development runs only.
+
+                    if tx_params:
+                        conn.execute(eth_sql, tx_params)
+                    if tt_params:
+                        conn.execute(tt_sql, tt_params)
+
+            # Upsert wallet analysis if provided
+            if wallet_analysis:
+                try:
+                    engine = self.db_config.initialize_engine()
+                    wa = wallet_analysis
+                    # Ensure chain_id is set (use 0 for cross-network aggregate) because wallet_analysis.chain_id is NOT NULL in schema
+                    wa_chain_id = wa.get('chain_id') if wa.get('chain_id') is not None else 0
+                    wa_stmt = text("""
+                    INSERT INTO wallet_analysis (
+                        wallet_address, chain_id, analysis_date, total_transactions,
+                        defi_transactions, total_volume_usd, protocols_used, token_portfolio, risk_score, last_activity
+                    ) VALUES (
+                        :wallet_address, :chain_id, :analysis_date, :total_transactions,
+                        :defi_transactions, :total_volume_usd, :protocols_used, :token_portfolio, :risk_score, :last_activity
                     )
-                    
-                    # Use merge to handle duplicates
-                    session.merge(tx)
-                    
-                    # Store token transfers if available
-                    if 'token_transfers' in tx_data:
-                        for transfer in tx_data['token_transfers']:
-                            token_transfer = TokenTransfer(
-                                chain_id=tx_data.get('chain_id'),
-                                tx_hash=tx_data.get('hash'),
-                                log_index=transfer.get('log_index', 0),
-                                block_number=tx_data.get('blockNumber'),
-                                block_time=datetime.fromtimestamp(int(tx_data.get('timeStamp', 0))),
-                                token_address=transfer.get('contractAddress', '').lower(),
-                                from_address=transfer.get('from', '').lower(),
-                                to_address=transfer.get('to', '').lower(),
-                                value_raw=int(transfer.get('value', 0)),
-                                value_scaled=transfer.get('value_scaled'),
-                                token_symbol=transfer.get('tokenSymbol'),
-                                token_name=transfer.get('tokenName'),
-                                token_decimals=int(transfer.get('tokenDecimal', 0)),
-                                usd_value=transfer.get('usd_value'),
-                                protocol=tx_data.get('protocol')
-                            )
-                            session.merge(token_transfer)
-                
-                # Store wallet analysis if provided
-                if wallet_analysis:
-                    analysis = WalletAnalysis(
-                        wallet_address=wallet_analysis.get('wallet_address', '').lower(),
-                        chain_id=wallet_analysis.get('chain_id'),
-                        total_transactions=wallet_analysis.get('total_transactions', 0),
-                        defi_transactions=wallet_analysis.get('defi_transactions', 0),
-                        total_volume_usd=wallet_analysis.get('total_volume_usd'),
-                        protocols_used=wallet_analysis.get('protocols_used', {}),
-                        token_portfolio=wallet_analysis.get('token_portfolio', {}),
-                        risk_score=wallet_analysis.get('risk_score'),
-                        last_activity=wallet_analysis.get('last_activity')
-                    )
-                    session.merge(analysis)
-                
-                session.commit()
-                
+                    ON CONFLICT (wallet_address, chain_id) DO UPDATE SET
+                        analysis_date = EXCLUDED.analysis_date,
+                        total_transactions = EXCLUDED.total_transactions,
+                        defi_transactions = EXCLUDED.defi_transactions,
+                        total_volume_usd = EXCLUDED.total_volume_usd,
+                        protocols_used = EXCLUDED.protocols_used,
+                        token_portfolio = EXCLUDED.token_portfolio,
+                        risk_score = EXCLUDED.risk_score,
+                        last_activity = EXCLUDED.last_activity;
+                    """)
+
+                    # Ensure analysis_date is timezone-aware UTC
+                    analysis_date = wa.get('analysis_date')
+                    if isinstance(analysis_date, datetime) and analysis_date.tzinfo is None:
+                        analysis_date = analysis_date.replace(tzinfo=timezone.utc)
+                    if analysis_date is None:
+                        analysis_date = datetime.now(timezone.utc)
+
+                    last_activity = wa.get('last_activity')
+                    if isinstance(last_activity, datetime) and last_activity.tzinfo is None:
+                        last_activity = last_activity.replace(tzinfo=timezone.utc)
+
+                    wa_params = {
+                        'wallet_address': wa.get('wallet_address', '').lower(),
+                        'chain_id': wa_chain_id,
+                        'analysis_date': analysis_date,
+                        'total_transactions': wa.get('total_transactions', 0),
+                        'defi_transactions': wa.get('defi_transactions', 0),
+                        'total_volume_usd': wa.get('total_volume_usd'),
+                        'protocols_used': json.dumps(wa.get('protocols_used') or {}),
+                        'token_portfolio': json.dumps(wa.get('token_portfolio') or {}),
+                        'risk_score': wa.get('risk_score'),
+                        'last_activity': last_activity
+                    }
+
+                    with engine.begin() as conn:
+                        conn.execute(wa_stmt, wa_params)
+                except Exception as e_wa:
+                    logger.error(f"Error upserting wallet analysis: {e_wa}")
+
             logger.info(f"Stored {len(transactions)} transactions in database")
             if wallet_analysis:
                 logger.info(f"Stored wallet analysis for {wallet_analysis.get('wallet_address')}")
             return True
-            
+
         except Exception as e:
-            logger.error(f"Error storing transactions: {e}")
+            logger.error(f"Error storing transactions (upsert path): {e}")
             return False
     
     def get_health_status(self) -> Dict[str, Any]:
