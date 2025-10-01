@@ -1,10 +1,42 @@
+
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "wallet2cointracking"
+version = "0.1.0"
+description = "Flask app to analyze multi-chain DeFi activity and export CoinTracking CSVs"
+readme = "README.md"
+license = {text = "MIT"}
 
 [tool.black]
 line-length = 88
-target-version = ['py311']
 
 [tool.ruff]
 line-length = 88
+select = ["E", "F", "W", "I", "C", "R"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-q"
+
+[tool.poetry]
+name = "wallet2cointracking"
+version = "0.1.0"
+description = "Migrate DeFi helpers into a modular Flask app and export CoinTracking CSVs"
+authors = ["Dev <dev@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+Flask = "*"
+requests = "*"
+"eth-abi" = ">=4.0.0"
+psycopg2-binary = ">=2.9.0"
+SQLAlchemy = ">=1.4.0"
+alembic = ">=1.8.0"
+python-dotenv = ">=0.19.0"

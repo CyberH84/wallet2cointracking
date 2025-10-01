@@ -1,3 +1,25 @@
+from flask import Flask
+from .config.settings import Settings
+
+
+def create_app(config: Settings | dict | None = None) -> Flask:
+    """App factory for the refactored package.
+
+    This factory is intentionally lightweight and delegates to the original
+    `app.py` runtime until the full migration is complete.
+    """
+    if isinstance(config, dict):
+        cfg = Settings(**config)
+    elif isinstance(config, Settings):
+        cfg = config
+    else:
+        cfg = Settings.from_env()
+
+    flask_app = Flask(__name__)
+    flask_app.config.from_mapping(cfg.as_dict())
+
+    # Register blueprints in future iterations
+    return flask_app
 """
 Lightweight, non-intrusive application package scaffold.
 

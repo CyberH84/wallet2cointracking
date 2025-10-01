@@ -145,22 +145,47 @@ This will:
 
 ## Usage
 
-1. **Enter Wallet Address**: Input your EVM-compatible wallet address
-2. **Select Network**: Choose between Flare Network or Arbitrum
 3. **Generate CSV**: Click "Generate & Download CSV" to analyze transactions
 4. **Import to CoinTracking**: Use the downloaded CSV file in CoinTracking.info
 
 ## API Configuration & Data Sources
 
 ### Blockchain Data Sources
-The application fetches real transaction data from multiple blockchain explorers:
-
-#### Primary APIs
-- **Arbiscan API**: `https://api.arbiscan.io/api` (Arbitrum transactions)
-- **Flare Explorer**: `https://flare-explorer.flare.network/api` (Flare network primary)
 - **Etherscan V2 Multi-chain**: `https://api.etherscan.io/v2/api` (Fallback with chain ID)
 
 #### API Authentication
+[## Development]
+
+Use the provided VS Code workspace tasks and pre-commit hooks to keep the codebase consistent.
+
+VS Code Tasks (from the Command Palette or `Run Task`):
+
+- `format` — run Black across the repository
+- `lint` — run Ruff checks and auto-fixes
+- `test` — run the pytest suite
+- `run app` — start the Flask app using the virtual environment Python
+
+Pre-commit
+
+1. Ensure the virtual environment is created and activated (`.venv\Scripts\Activate.ps1` on Windows PowerShell).
+2. Install pre-commit: `pip install pre-commit`
+3. Install the git hook: `pre-commit install`
+4. Run hooks against all files once: `pre-commit run --all-files`
+
+Running tests
+
+Run a focused test file:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q tests/test_runtime_disk_cache.py
+```
+
+Run the full test suite:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
 - **API Key**: `5GNG5ZQRP3TEF7EJ7RTMW96N68JJQZFD9D` (Etherscan-compatible)
 - **Rate Limiting**: Automatic handling with fallback mechanisms
 - **Health Monitoring**: Built-in API endpoint health checks
