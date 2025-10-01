@@ -24,6 +24,28 @@ import os
 from pathlib import Path
 import concurrent.futures
 
+# Database integration
+try:
+    from database import db_manager, get_db_health, test_db_connection, db_config
+    DATABASE_ENABLED = True
+    app_logger = logging.getLogger(__name__)
+    app_logger.info("Database integration enabled")
+except ImportError as e:
+    DATABASE_ENABLED = False
+    app_logger = logging.getLogger(__name__)
+    app_logger.warning(f"Database integration disabled: {e}")
+    # Create mock functions for compatibility
+    class MockDBManager:
+        def store_transactions(self, *args, **kwargs):
+            return False
+        def get_wallet_summary(self, *args, **kwargs):
+            return None
+    db_manager = MockDBManager()
+    def get_db_health():
+        return {'status': 'disabled', 'message': 'Database not configured'}
+    def test_db_connection():
+        return False
+
 app = Flask(__name__)
 
 # Configure logging for detailed terminal output
@@ -103,6 +125,35 @@ def _finalize_job(job_id: str, csv_bytes: bytes):
         job['csv_bytes'] = csv_bytes
         job['status'] = 'completed'
         job['finished_at'] = int(time.time())
+        
+        # Store transactions in database if enabled
+        app.logger.info(f"🔍 _finalize_job: DATABASE_ENABLED={DATABASE_ENABLED}, job keys={list(job.keys())}")
+        if DATABASE_ENABLED:
+            all_transactions = job.get('all_transactions', [])
+            wallet_analysis = job.get('wallet_analysis')
+            app.logger.info(f"🔍 all_transactions count: {len(all_transactions)}, wallet_analysis: {wallet_analysis is not None}")
+            
+            if all_transactions:
+                try:
+                    app.logger.info(f"🗄️ Storing {len(all_transactions)} transactions in database...")
+                    success = db_manager.store_transactions(all_transactions, wallet_analysis)
+                    if success:
+                        app.logger.info("✅ Transactions stored in database successfully")
+                        if wallet_analysis:
+                            app.logger.info("✅ Wallet analysis stored in database successfully")
+                    else:
+                        app.logger.warning("⚠️ Failed to store transactions in database")
+                    job['db_stored'] = success
+                except Exception as e:
+                    app.logger.error(f"❌ Database storage error: {e}")
+                    import traceback
+                    app.logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                    job['db_stored'] = False
+            else:
+                app.logger.warning("⚠️ No transactions to store in database")
+                job['db_stored'] = False
+        else:
+            app.logger.warning("⚠️ Database storage disabled")
 
 def _fail_job(job_id: str, error_message: str):
     with JOBS_LOCK:
@@ -112,6 +163,175 @@ def _fail_job(job_id: str, error_message: str):
         job['status'] = 'failed'
         job['error'] = error_message
         job['finished_at'] = int(time.time())
+
+def prepare_transaction_for_db(tx: Dict, defi_analysis: Dict, network: str, wallet_address: str) -> Dict[str, Any]:
+    """Prepare raw transaction data for database storage"""
+    try:
+        # Get chain ID from network
+        chain_id_map = {
+            'arbitrum': 42161,
+            'flare': 14,
+            'ethereum': 1
+        }
+        chain_id = chain_id_map.get(network, 0)
+        
+        # Parse basic transaction data
+        timestamp = int(tx.get('timeStamp', 0))
+        
+        # Prepare the transaction data structure that matches the database schema
+        db_tx = {
+            'chain_id': chain_id,
+            'hash': tx.get('hash', ''),
+            'blockNumber': int(tx.get('blockNumber', 0)),
+            'timeStamp': timestamp,
+            'from': tx.get('from', '').lower(),
+            'to': tx.get('to', '').lower(),
+            'value': tx.get('value', '0'),
+            'gasUsed': int(tx.get('gasUsed', 0)),
+            'gasPrice': int(tx.get('gasPrice', 0)),
+            'txreceipt_status': int(tx.get('isError', '0') == '0'),  # Convert to success status
+            'input': tx.get('input', ''),
+            'logs': tx.get('logs', []),
+            'protocol': defi_analysis.get('protocol', 'unknown'),
+            'action_type': defi_analysis.get('action_type', 'transfer'),
+            'token_transfers': []
+        }
+        
+        # Handle token transfers - check if this is a token transfer transaction
+        if tx.get('contractAddress') or tx.get('tokenAddress'):
+            # This is a token transfer transaction
+            token_transfer = {
+                'log_index': 0,
+                'contractAddress': tx.get('contractAddress') or tx.get('tokenAddress', ''),
+                'from': tx.get('from', '').lower(),
+                'to': tx.get('to', '').lower(),
+                'value': tx.get('value', '0'),
+                'tokenSymbol': tx.get('tokenSymbol', ''),
+                'tokenName': tx.get('tokenName', ''),
+                'tokenDecimal': int(tx.get('tokenDecimal', 18)),
+                'value_scaled': None,
+                'usd_value': None
+            }
+            
+            # Calculate scaled value
+            try:
+                decimals = int(tx.get('tokenDecimal', 18))
+                raw_value = int(token_transfer['value'])
+                token_transfer['value_scaled'] = raw_value / (10 ** decimals)
+            except (ValueError, TypeError):
+                token_transfer['value_scaled'] = 0
+                
+            db_tx['token_transfers'] = [token_transfer]
+        
+        # Add any additional logs as token transfers if available
+        if isinstance(tx.get('logs'), list):
+            for i, log in enumerate(tx.get('logs', [])):
+                if isinstance(log, dict) and log.get('topics'):
+                    # Check if this is a Transfer event (topic[0] == Transfer signature)
+                    if (log.get('topics') and 
+                        len(log['topics']) > 0 and 
+                        log['topics'][0] == '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'):
+                        
+                        # Parse Transfer event
+                        try:
+                            transfer_data = {
+                                'log_index': i + 1,
+                                'contractAddress': log.get('address', '').lower(),
+                                'from': log['topics'][1][-40:] if len(log['topics']) > 1 else '',
+                                'to': log['topics'][2][-40:] if len(log['topics']) > 2 else '',
+                                'value': str(int(log.get('data', '0x0'), 16)) if log.get('data') else '0',
+                                'tokenSymbol': '',
+                                'tokenName': '',
+                                'tokenDecimal': 18,
+                                'value_scaled': None,
+                                'usd_value': None
+                            }
+                            
+                            # Add 0x prefix to addresses
+                            if transfer_data['from']:
+                                transfer_data['from'] = '0x' + transfer_data['from']
+                            if transfer_data['to']:
+                                transfer_data['to'] = '0x' + transfer_data['to']
+                                
+                            db_tx['token_transfers'].append(transfer_data)
+                        except (ValueError, IndexError, KeyError):
+                            # Skip malformed log entries
+                            continue
+        
+        return db_tx
+        
+    except Exception as e:
+        app.logger.error(f"Error preparing transaction for DB: {e}")
+        # Return minimal transaction data in case of error
+        return {
+            'chain_id': chain_id_map.get(network, 0),
+            'hash': tx.get('hash', ''),
+            'blockNumber': int(tx.get('blockNumber', 0)),
+            'timeStamp': int(tx.get('timeStamp', 0)),
+            'from': tx.get('from', '').lower(),
+            'to': tx.get('to', '').lower(),
+            'value': tx.get('value', '0'),
+            'gasUsed': int(tx.get('gasUsed', 0)),
+            'gasPrice': int(tx.get('gasPrice', 0)),
+            'txreceipt_status': 1,
+            'input': '',
+            'logs': [],
+            'protocol': 'unknown',
+            'action_type': 'transfer',
+            'token_transfers': []
+        }
+
+def create_wallet_analysis(wallet_address: str, raw_transactions: List[Dict], networks: List[str]) -> Dict[str, Any]:
+    """Create wallet analysis summary"""
+    try:
+        total_transactions = len(raw_transactions)
+        total_gas_used = sum(int(tx.get('gasUsed', 0)) for tx in raw_transactions)
+        total_gas_cost = sum(int(tx.get('gasUsed', 0)) * int(tx.get('gasPrice', 0)) for tx in raw_transactions)
+        
+        # Count unique contracts interacted with
+        unique_contracts = set()
+        protocols_used = set()
+        
+        for tx in raw_transactions:
+            if tx.get('to'):
+                unique_contracts.add(tx['to'].lower())
+            if tx.get('protocol') and tx['protocol'] != 'unknown':
+                protocols_used.add(tx['protocol'])
+        
+        # Calculate date range
+        timestamps = [int(tx.get('timeStamp', 0)) for tx in raw_transactions if tx.get('timeStamp')]
+        first_tx_date = datetime.fromtimestamp(min(timestamps)) if timestamps else datetime.now()
+        last_tx_date = datetime.fromtimestamp(max(timestamps)) if timestamps else datetime.now()
+        
+        return {
+            'wallet_address': wallet_address.lower(),
+            'networks': ','.join(networks),
+            'total_transactions': total_transactions,
+            'unique_contracts': len(unique_contracts),
+            'total_gas_used': str(total_gas_used),
+            'total_gas_cost_wei': str(total_gas_cost),
+            'protocols_used': ','.join(sorted(protocols_used)),
+            'first_transaction_date': first_tx_date,
+            'last_transaction_date': last_tx_date,
+            'analysis_date': datetime.now(),
+            'defi_score': min(len(protocols_used) * 10, 100)  # Simple DeFi activity score
+        }
+        
+    except Exception as e:
+        app.logger.error(f"Error creating wallet analysis: {e}")
+        return {
+            'wallet_address': wallet_address.lower(),
+            'networks': ','.join(networks),
+            'total_transactions': 0,
+            'unique_contracts': 0,
+            'total_gas_used': '0',
+            'total_gas_cost_wei': '0',
+            'protocols_used': '',
+            'first_transaction_date': datetime.now(),
+            'last_transaction_date': datetime.now(),
+            'analysis_date': datetime.now(),
+            'defi_score': 0
+        }
 
 def prefetch_token_meta_bulk(contract_addresses: List[str], network: str, max_workers: int = 10) -> None:
     """Prefetch token metadata (name/symbol) for a list of contract addresses in parallel.
@@ -147,10 +367,11 @@ def prefetch_token_meta_bulk(contract_addresses: List[str], network: str, max_wo
 def process_job(job_id: str, wallet_address: str, networks: List[str]):
     try:
         app.logger.info("Job %s started for %s on %s", job_id, wallet_address, networks)
-        max_transactions_per_network = 2000
+        max_transactions_per_network = 10000  # Increased limit for production
         app.logger.info("Job %s: max %s tx per network", job_id, max_transactions_per_network)
 
-        all_transactions_local: List[Dict[str, Any]] = []
+        all_transactions_local: List[Dict[str, Any]] = []  # CSV format
+        all_raw_transactions: List[Dict[str, Any]] = []    # Raw transaction data for DB
         all_tx_lock = threading.Lock()
 
         def process_network(network: str):
@@ -163,7 +384,8 @@ def process_job(job_id: str, wallet_address: str, networks: List[str]):
                 app.logger.info("Job %s: %s fetched %s tx (capped %s)", job_id, network, len(txs), total_for_net)
 
                 processed_count = 0
-                local_rows: List[Dict[str, Any]] = []
+                local_rows: List[Dict[str, Any]] = []           # CSV format data
+                local_raw_txs: List[Dict[str, Any]] = []        # Raw transaction data for DB
                 # Before iterating transactions, collect a seeded set of token contract addresses
                 # from tokentx events in the batch to prefetch their metadata in bulk.
                 try:
@@ -201,18 +423,24 @@ def process_job(job_id: str, wallet_address: str, networks: List[str]):
                             pass
 
                     try:
+                        # Convert to CSV format for download
                         local_rows.append(convert_to_required_format(tx, defi_analysis, network, wallet_address))
+                        
+                        # Prepare raw transaction data for database storage
+                        raw_tx_data = prepare_transaction_for_db(tx, defi_analysis, network, wallet_address)
+                        local_raw_txs.append(raw_tx_data)
+                        
                     except Exception as conv_ex:
                         app.logger.exception("Job %s: convert_to_required_format failed for tx %s: %s", job_id, tx.get('hash'), conv_ex)
                         # Skip this row but continue
 
                     processed_count += 1
                     _update_progress(job_id, network, inc=1)
-                    if processed_count % 10 == 0:
-                        time.sleep(0.01)
+                    # Removed sleep for production performance
 
                 with all_tx_lock:
                     all_transactions_local.extend(local_rows)
+                    all_raw_transactions.extend(local_raw_txs)
                 app.logger.info("Job %s: %s processed %s rows", job_id, network, len(local_rows))
             except Exception as ne:
                 app.logger.exception("Job %s: network %s failed: %s", job_id, network, ne)
@@ -243,8 +471,23 @@ def process_job(job_id: str, wallet_address: str, networks: List[str]):
 
         csv_io = io.BytesIO()
         csv_io.write(csv_content.encode('utf-8'))
+        
+        # Store raw transactions and wallet analysis in job for database storage
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job['all_transactions'] = all_raw_transactions
+                # Create wallet analysis
+                try:
+                    wallet_analysis = create_wallet_analysis(wallet_address, networks[0] if networks else 'arbitrum', all_raw_transactions)
+                    job['wallet_analysis'] = wallet_analysis
+                    app.logger.info(f"Generated wallet analysis for {wallet_address}")
+                except Exception as e:
+                    app.logger.error(f"Failed to create wallet analysis: {e}")
+                    job['wallet_analysis'] = None
+        
         _finalize_job(job_id, csv_io.getvalue())
-        app.logger.info("Job %s completed, %s rows", job_id, len(all_transactions_local))
+        app.logger.info("Job %s completed, %s rows, %s raw transactions", job_id, len(all_transactions_local), len(all_raw_transactions))
     except Exception as e:
         app.logger.exception("Job %s failed: %s", job_id, e)
         _fail_job(job_id, str(e))
@@ -288,6 +531,34 @@ def job_status(job_id: str):
             'finished_at': job['finished_at'],
         }
         return jsonify(resp)
+
+@app.route('/debug_status', methods=['GET'])
+def debug_status():
+    """Debug endpoint to check Flask app status"""
+    return jsonify({
+        'DATABASE_ENABLED': DATABASE_ENABLED,
+        'db_manager_available': db_manager is not None,
+        'jobs_count': len(JOBS)
+    })
+
+@app.route('/debug_job/<job_id>', methods=['GET'])
+def debug_job(job_id: str):
+    """Debug endpoint to check job data"""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        return jsonify({
+            'job_keys': list(job.keys()),
+            'has_all_transactions': 'all_transactions' in job,
+            'all_transactions_count': len(job.get('all_transactions', [])),
+            'has_wallet_analysis': 'wallet_analysis' in job,
+            'has_csv_bytes': 'csv_bytes' in job,
+            'database_enabled': DATABASE_ENABLED,
+            'status': job.get('status'),
+            'db_stored': job.get('db_stored', 'not_set')
+        })
 
 @app.route('/download/<job_id>', methods=['GET'])
 def download(job_id: str):
@@ -380,13 +651,46 @@ def health():
     except Exception as e:
         results['checks']['flare']['rpc']['error'] = str(e)
 
+    # Database health check
+    if DATABASE_ENABLED:
+        try:
+            start = time.time()
+            db_health = get_db_health()
+            db_ok = db_health.get('status') == 'healthy'
+            results['checks']['database'] = {
+                'ok': db_ok,
+                'latency_ms': int((time.time() - start) * 1000),
+                'version': db_health.get('database_version', 'Unknown'),
+                'connection_pool_size': db_health.get('connection_pool_size', 0)
+            }
+            if not db_ok:
+                results['checks']['database']['error'] = db_health.get('error', 'Unknown error')
+        except Exception as e:
+            results['checks']['database'] = {
+                'ok': False,
+                'latency_ms': None,
+                'error': str(e)
+            }
+    else:
+        results['checks']['database'] = {
+            'ok': False,
+            'latency_ms': None,
+            'error': 'Database integration disabled'
+        }
+
     # Overall status
     any_fail = False
     for net in results['checks'].values():
         for part in net.values():
-            if not part['ok']:
-                any_fail = True
-                break
+            # Handle both dict and boolean values
+            if isinstance(part, dict):
+                if not part.get('ok', False):
+                    any_fail = True
+                    break
+            elif isinstance(part, bool):
+                if not part:
+                    any_fail = True
+                    break
         if any_fail:
             break
     results['status'] = 'ok' if not any_fail else 'degraded'
@@ -1258,7 +1562,7 @@ def fetch_transactions_from_explorer(wallet_address: str, network: str, limit: i
         print(f"Unsupported network: {network}")
         return []
 
-def fetch_from_arbitrum_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
+def fetch_from_arbitrum_rpc(wallet_address: str, limit: int = 1000) -> List[Dict]:
     """Try to fetch transactions using direct RPC call to Arbitrum network"""
     try:
         # Use the official Arbitrum RPC endpoint
@@ -1281,7 +1585,7 @@ def fetch_from_arbitrum_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
             
             # Search through recent blocks for transactions
             transactions = []
-            search_blocks = min(100, latest_block - start_block)  # Limit to 100 blocks max
+            search_blocks = min(500, latest_block - start_block)  # Search more blocks for better coverage
             
             for i in range(search_blocks):
                 block_num = latest_block - i
@@ -1329,9 +1633,9 @@ def fetch_from_arbitrum_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
                         if len(transactions) >= limit:
                             break
                 
-                # Small delay to avoid overwhelming the RPC
-                if i % 10 == 0:
-                    time.sleep(0.1)
+                # Reduced delay for production performance
+                if i % 50 == 0:
+                    time.sleep(0.02)
             
             print(f"Arbitrum RPC: Found {len(transactions)} transactions")
             return transactions
@@ -1340,7 +1644,7 @@ def fetch_from_arbitrum_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
         print(f"Arbitrum RPC call failed: {e}")
         return []
 
-def fetch_from_flare_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
+def fetch_from_flare_rpc(wallet_address: str, limit: int = 1000) -> List[Dict]:
     """Try to fetch transactions using direct RPC call to Flare network"""
     try:
         # Use the official Flare RPC endpoint from documentation
@@ -1363,7 +1667,7 @@ def fetch_from_flare_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
             
             # Search through recent blocks for transactions
             transactions = []
-            search_blocks = min(100, latest_block - start_block)  # Limit to 100 blocks max
+            search_blocks = min(500, latest_block - start_block)  # Search more blocks for better coverage
             
             for i in range(search_blocks):
                 block_num = latest_block - i
@@ -1411,9 +1715,9 @@ def fetch_from_flare_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
                         if len(transactions) >= limit:
                             break
                 
-                # Small delay to avoid overwhelming the RPC
-                if i % 10 == 0:
-                    time.sleep(0.1)
+                # Reduced delay for production performance
+                if i % 50 == 0:
+                    time.sleep(0.02)
             
             print(f"Flare RPC: Found {len(transactions)} transactions")
             return transactions
@@ -1422,7 +1726,7 @@ def fetch_from_flare_rpc(wallet_address: str, limit: int = 50) -> List[Dict]:
         print(f"Flare RPC call failed: {e}")
         return []
 
-def generate_mock_arbitrum_transactions(wallet_address: str, limit: int = 50) -> List[Dict]:
+def generate_mock_arbitrum_transactions(wallet_address: str, limit: int = 100) -> List[Dict]:
     """Generate mock Arbitrum transactions for testing when APIs are down"""
     import random
     import time
@@ -1450,7 +1754,7 @@ def generate_mock_arbitrum_transactions(wallet_address: str, limit: int = 50) ->
     print(f"Generated {len(mock_transactions)} mock Arbitrum transactions")
     return mock_transactions
 
-def generate_mock_flare_transactions(wallet_address: str, limit: int = 50) -> List[Dict]:
+def generate_mock_flare_transactions(wallet_address: str, limit: int = 100) -> List[Dict]:
     """Generate mock Flare transactions for testing when APIs are down"""
     import random
     import time
@@ -2805,7 +3109,7 @@ def get_transactions():
         # Fetch transactions from all selected networks
         all_transactions = []
         total_defi_count = 0
-        max_transactions_per_network = 50  # Limit to prevent timeouts
+        max_transactions_per_network = 5000  # Production limit - much higher for real usage
         
         for network in networks:
             print(f"Processing {network} network...")
@@ -2818,7 +3122,7 @@ def get_transactions():
                 processed_count = 0
                 for tx in transactions:
                     if processed_count >= max_transactions_per_network:
-                        print(f"Limited to {max_transactions_per_network} transactions for {network}")
+                        print(f"Processed maximum {max_transactions_per_network} transactions for {network}")
                         break
                     
                     print(f"Processing transaction {processed_count + 1}/{min(len(transactions), max_transactions_per_network)} for {network}")
@@ -2830,10 +3134,9 @@ def get_transactions():
                     all_transactions.append(transaction_row)
                     processed_count += 1
                     
-                    # Add small delay to prevent overwhelming the system
-                    if processed_count % 10 == 0:
+                    # Progress logging (no delays for production performance)
+                    if processed_count % 100 == 0:
                         print(f"Processed {processed_count} transactions for {network}")
-                        time.sleep(0.01)  # 10ms delay every 10 transactions
             else:
                 print(f"No transactions found on {network}")
         
@@ -2888,5 +3191,81 @@ def get_transactions():
         print(f"Error processing request: {e}")
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
+@app.route('/db/health')
+def database_health():
+    """Dedicated database health check endpoint"""
+    if not DATABASE_ENABLED:
+        return jsonify({
+            'status': 'disabled',
+            'message': 'Database integration not available'
+        }), 503
+    
+    health = get_db_health()
+    status_code = 200 if health.get('status') == 'healthy' else 503
+    return jsonify(health), status_code
+
+@app.route('/db/init', methods=['POST'])
+def initialize_database():
+    """Initialize database with ETL schemas"""
+    if not DATABASE_ENABLED:
+        return jsonify({
+            'error': 'Database integration not available'
+        }), 503
+    
+    try:
+        success = db_manager.initialize_database()
+        if success:
+            # Also run ETL initialization
+            etl_success = db_manager.run_etl_initialization()
+            return jsonify({
+                'status': 'success',
+                'message': 'Database initialized successfully',
+                'etl_initialized': etl_success
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database initialization failed'
+            }), 500
+    except Exception as e:
+        app.logger.error(f"Database initialization error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@app.route('/db/wallet/<wallet_address>/<int:chain_id>')
+def get_wallet_db_summary(wallet_address: str, chain_id: int):
+    """Get wallet summary from database"""
+    if not DATABASE_ENABLED:
+        return jsonify({
+            'error': 'Database integration not available'
+        }), 503
+    
+    try:
+        summary = db_manager.get_wallet_summary(wallet_address, chain_id)
+        if summary:
+            return jsonify(summary)
+        else:
+            return jsonify({
+                'message': 'No data found for this wallet',
+                'wallet_address': wallet_address,
+                'chain_id': chain_id
+            }), 404
+    except Exception as e:
+        app.logger.error(f"Error getting wallet summary: {e}")
+        return jsonify({
+            'error': str(e)
+        }), 500
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Test database connection on startup if enabled
+    if DATABASE_ENABLED:
+        app.logger.info("Testing database connection...")
+        if test_db_connection():
+            app.logger.info("✅ Database connection successful!")
+        else:
+            app.logger.warning("⚠️  Database connection failed. Running without database.")
+    
+    # Production mode - no debug, no auto-reload for better performance
+    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)

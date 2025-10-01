@@ -1,10 +1,39 @@
 # Flare Wallet Transaction Exporter
 
-A comprehensive Python Flask web application that analyzes DeFi transactions from multiple blockchain networks and exports them in CoinTracking.info compatible CSV format with enhanced protocol detection and contract information.
+A comprehensive Python Flask web application that analyzes DeFi transactions from multiple blockchain networks and exports them in CoinTracking.info compatible CSV format with enhanced protocol detection, PostgreSQL database integration, ETL pipeline capabilities, and advanced wallet analytics.
 
 ## Features
 
 - **Multi-Network Support**: Flare Network and Arbitrum with comprehensive RPC connectivity
+- **PostgreSQL Database Integration**: 
+  - Persistent transaction storage and analytics with dual-format processing
+  - ETL pipeline with layered data warehouse (raw/stage/core/ma### Enhanced Database Integration
+
+The PostgreSQL integration has been significantly enhanced with advanced transaction processing capabilities:
+
+### Enhanced Processing Pipeline
+- **Dual-Format Processing**: Every transaction analysis now generates both CSV export AND database storage simultaneously
+- **Real-Time Analytics**: Wallet analysis data is automatically generated and stored during processing
+- **Transaction Normalization**: Raw transaction data is transformed to match database schema requirements
+- **Comprehensive Storage**: Transactions, token transfers, and wallet analytics are all persisted
+
+### Performance & Scalability
+- **Persistent Storage**: Transaction data survives application restarts with comprehensive historical tracking
+- **Connection Pooling**: Efficient database connection management with automatic retry logic
+- **Indexed Queries**: Fast wallet lookups and portfolio analysis with optimized database schemas
+- **Bulk Operations**: Efficient processing of large transaction sets with batch storage capabilities
+- **Health Monitoring**: Real-time database performance metrics and connectivity validation
+
+### Advanced Analytics & Wallet Intelligence
+- **Historical Analysis**: Track wallet performance over time with stored transaction patterns
+- **Cross-Chain Analytics**: Compare activity across networks with unified data model
+- **Protocol Usage Patterns**: Identify DeFi strategy trends with comprehensive protocol interaction tracking
+- **Risk Assessment**: Portfolio diversification and exposure analysis with automated risk scoring
+- **Transaction Classification**: Automatic categorization of DeFi operations (lending, trading, staking, etc.)
+- **Volume Analysis**: Track transaction volumes and USD values over timeed wallet analysis and portfolio tracking with comprehensive analytics
+  - Real-time health monitoring and connection pooling
+  - Enhanced transaction processing pipeline with database storage
+  - Wallet analysis generation with protocol usage and risk assessment
 - **Enhanced DeFi Protocol Detection**: 
   - **Aave V3** (lending/borrowing operations)
   - **OpenOcean** (DEX aggregator trading)
@@ -15,7 +44,8 @@ A comprehensive Python Flask web application that analyzes DeFi transactions fro
 - **CoinTracking.info Export**: Enhanced CSV format with detailed contract information
 - **Modern Web Interface**: Responsive design with real-time job progress tracking
 - **Token Icon Caching**: Automated token logo fetching and local caching system
-- **Health Monitoring**: Built-in network connectivity and API health checks
+- **Health Monitoring**: Built-in network connectivity, API, and database health checks
+- **ETL Pipeline**: Comprehensive blockchain data processing with SQL-based transformations
 
 ## Supported Networks & Protocols
 
@@ -48,30 +78,62 @@ A comprehensive Python Flask web application that analyzes DeFi transactions fro
 
 ### Prerequisites
 - Python 3.8+ (tested with Python 3.13)
+- PostgreSQL 12+ (optional but recommended for full features)
 - Internet connection for blockchain API access
 
 ### Quick Start
 
+#### Automated Setup (Recommended)
+
+Run the setup script that handles everything automatically:
+
+```bash
+python setup.py
+```
+
+This will:
+- Create Python virtual environment
+- Install all dependencies including PostgreSQL drivers
+- Set up database configuration
+- Initialize database schemas and ETL pipeline
+- Run basic tests and validation
+
+#### Manual Setup
+
 1. **Clone the repository**:
-   ```powershell
+   ```bash
    git clone <repository-url>
-   cd cursor-app-v2
+   cd wallet2cointracking
    ```
 
-2. **Create virtual environment** (recommended):
-   ```powershell
+2. **Create virtual environment**:
+   ```bash
    python -m venv .venv
    .venv\Scripts\Activate.ps1  # Windows PowerShell
    # or: source .venv/bin/activate  # Linux/Mac
    ```
 
-3. **Install Python dependencies**:
-   ```powershell
+3. **Install dependencies**:
+   ```bash
    pip install -r requirements.txt
    ```
 
-4. **Run the application**:
-   ```powershell
+4. **Configure database** (optional):
+   ```bash
+   # Copy environment template
+   cp .env.example .env
+   
+   # Edit .env with your PostgreSQL credentials
+   # DATABASE_URL=postgresql://username:password@localhost:5432/defi_warehouse
+   
+   # Create database
+   createdb defi_warehouse
+   
+   # Initialize database and ETL schemas
+   python migrate_db.py
+   ```
+
+5. **Run the application**:
    python app.py
    ```
 
@@ -213,10 +275,21 @@ The web UI offers a simple form to enter a wallet address, select networks, and 
 
 ### Core Endpoints
 - **`GET /`** — Main web interface for transaction analysis
-- **`GET /health`** — Comprehensive health check for all external APIs and RPC endpoints
+- **`GET /health`** — Comprehensive health check for all external APIs, RPC endpoints, and database
 - **`POST /start_job`** — Initialize asynchronous CSV generation job (returns job_id)
 - **`GET /job_status/<job_id>`** — Real-time job progress and status monitoring
 - **`GET /download/<job_id>`** — Download completed CSV export file
+
+### Database Management
+- **`GET /db/health`** — Dedicated database health check and statistics
+- **`POST /db/init`** — Initialize database schemas and ETL pipeline
+- **`GET /db/wallet/<address>/<chain_id>`** — Get stored wallet analysis from database
+
+### Enhanced Database Features
+- **Dual-Format Processing**: Simultaneous CSV export and database storage during transaction analysis
+- **Wallet Analytics Storage**: Comprehensive wallet analysis with protocol usage, transaction patterns, and risk metrics
+- **Transaction Storage**: Complete transaction data with token transfers, protocol detection, and metadata
+- **Database Health Monitoring**: Real-time monitoring of database connectivity, table counts, and performance metrics
 
 ### Network Analysis
 - **`GET /network_summary/<network>/<wallet>`** — Detailed wallet analysis with:
@@ -259,10 +332,108 @@ Invoke-WebRequest -Uri "http://127.0.0.1:5000/download/$($jobResponse.job_id)" -
 ```
 
 **Health Check:**
-```powershell
-# Monitor system health
-Invoke-RestMethod -Uri 'http://127.0.0.1:5000/health' -Method GET
+```bash
+# Monitor system health (includes database status)
+curl http://127.0.0.1:5000/health
+
+# Database-specific health check
+curl http://127.0.0.1:5000/db/health
+
+# Initialize database
+curl -X POST http://127.0.0.1:5000/db/init
 ```
+
+## ETL Pipeline
+
+The application includes a comprehensive ETL (Extract, Transform, Load) pipeline for processing blockchain data at scale.
+
+### ETL Architecture
+
+The pipeline uses a layered data warehouse approach with PostgreSQL:
+
+```
+Raw Data → Stage → Core → Marts
+    ↓        ↓      ↓      ↓
+Blockchain  Clean  Business Analytics
+  Events    Data   Logic   & Reports
+```
+
+### ETL Components
+
+Located in the `etl/` folder:
+
+- **`00_init_schemas.sql`** - Database schema initialization
+- **`02_seed_chains.sql`** - Supported blockchain networks
+- **`03_seed_contracts_*.sql`** - Protocol contract addresses
+- **`04_etl_openocean.sql`** - OpenOcean DEX data processing
+- **`05_etl_sparkdex_v3.sql`** - SparkDEX V3 liquidity data
+- **`06_etl_aave_v3.sql`** - Aave V3 lending protocol
+- **`07_etl_kinetic.sql`** - Kinetic Market data
+- **`09_etl_ftso.sql`** - Flare FTSO oracle data
+- **`10_amount_scaling_helpers.sql`** - Token amount utilities
+
+### Running ETL Jobs
+
+#### Daily Processing (Recommended)
+```bash
+cd etl
+
+# Process latest blocks for Arbitrum (handles reorgs)
+./run_daily_tail.sh 42161 50000000
+
+# Process latest blocks for Flare
+./run_daily_tail.sh 14 10000000
+```
+
+#### Custom Block Range
+```bash
+cd etl
+
+# Process specific block range
+./run_window.sh 42161 49000000 50000000  # Arbitrum blocks 49M-50M
+./run_window.sh 14 9000000 10000000      # Flare blocks 9M-10M
+```
+
+#### Configuration
+
+Set up ETL environment in `.env`:
+
+```env
+# ETL Configuration
+PGURL=postgresql://username:password@localhost:5432/defi_warehouse
+REORG_WINDOW=200
+DEFAULT_FROM_BLOCK=0
+DEFAULT_TO_BLOCK=9223372036854775807
+
+# Chain Configuration
+ARBITRUM_CHAIN_ID=42161
+FLARE_CHAIN_ID=14
+```
+
+### Data Models
+
+The ETL pipeline creates comprehensive data models:
+
+#### Core Tables
+- **`core.dim_chain`** - Blockchain network metadata
+- **`core.dim_token`** - Token information and pricing
+- **`core.contracts`** - DeFi protocol contract registry
+- **`core.blocks`** - Block metadata and timestamps
+
+#### Protocol Tables
+- **`core.openocean_swaps`** - DEX swap transactions
+- **`core.sparkdex_v3_pools`** - Liquidity pool data
+- **`core.aave_v3_*`** - Lending protocol events
+- **`core.ftso_*`** - Flare oracle data
+
+### Integration with Web App
+
+The ETL pipeline integrates seamlessly with the Flask application:
+
+- Transactions processed via web interface are automatically stored
+- Database health monitoring includes ETL schema status
+- Portfolio analysis uses both real-time API data and historical ETL data
+- Advanced analytics queries leverage the data warehouse structure
 
 ## Technical Implementation Details
 
@@ -467,6 +638,52 @@ Get-Content logs/app.log -Tail 50
 - **Disk**: Minimal (logs + cached icons + token metadata)
 - **Network**: Dependent on blockchain API response times
 - **CPU**: Low usage except during CSV generation
+
+## Database Benefits
+
+The PostgreSQL integration provides significant advantages:
+
+### Performance & Scalability
+- **Persistent Storage**: Transaction data survives application restarts
+- **Connection Pooling**: Efficient database connection management
+- **Indexed Queries**: Fast wallet lookups and portfolio analysis
+- **Bulk Operations**: Efficient processing of large transaction sets
+
+### Advanced Analytics
+- **Historical Analysis**: Track wallet performance over time
+- **Cross-Chain Analytics**: Compare activity across networks
+- **Protocol Usage Patterns**: Identify DeFi strategy trends
+- **Risk Assessment**: Portfolio diversification and exposure analysis
+
+### Enhanced Data Warehouse Features
+- **ETL Pipeline**: Process blockchain data at scale with automated transaction ingestion
+- **Layered Architecture**: Clean separation of raw, processed, and analytical data with enhanced schema design
+- **SQL Analytics**: Direct database queries for custom analysis with comprehensive wallet analytics tables
+- **Backup & Recovery**: Enterprise-grade data protection with automated migration capabilities
+- **Schema Evolution**: Database migration scripts for seamless updates and enhancements
+
+### Enhanced Operational Benefits
+- **Advanced Health Monitoring**: Real-time database performance metrics, table counts, and transaction statistics
+- **Graceful Degradation**: Application continues with CSV-only mode if database unavailable
+- **Enhanced Development Tools**: Migration scripts, validation utilities, and comprehensive testing framework
+- **Production Ready**: Connection pooling, error handling, comprehensive logging, and automatic retry logic
+- **Data Validation**: Built-in validation for transaction data integrity and wallet analysis accuracy
+
+### Database Schema & Models
+The enhanced integration includes comprehensive database models:
+
+#### Core Transaction Tables
+- **`ethereum_transactions`**: Complete transaction data with protocol detection and metadata
+- **`token_transfers`**: Detailed token transfer information with USD valuations
+- **`wallet_analysis`**: Comprehensive wallet analytics with protocol usage patterns and risk assessment
+
+#### Enhanced Features
+- **Automatic Data Transformation**: Raw API data is automatically converted to database-compatible format
+- **Duplicate Handling**: Intelligent merge operations prevent duplicate transaction storage
+- **Real-Time Updates**: Transaction processing updates both CSV generation and database storage
+- **Comprehensive Logging**: Detailed logging of all database operations with error tracking
+
+For detailed information, see [DATABASE_INTEGRATION.md](DATABASE_INTEGRATION.md).
 
 ## License and Legal
 

@@ -174,30 +174,116 @@
         }
         
         .health {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
             margin-bottom: 20px;
+        }
+
+        .health-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .overall-status {
+            text-align: center;
+            padding: 16px;
+            border-radius: 12px;
+            font-size: 1.1em;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            margin-bottom: 16px;
+        }
+
+        .overall-status.ok {
+            background: linear-gradient(135deg, #dcfce7, #bbf7d0);
+            border: 1px solid #16a34a;
+            color: #15803d;
+        }
+
+        .overall-status.degraded {
+            background: linear-gradient(135deg, #fef3c7, #fde68a);
+            border: 1px solid #f59e0b;
+            color: #d97706;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 12px;
+        }
+
+        .status-category {
+            background: #fafafa;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+
+        .status-category h4 {
+            margin: 0 0 12px 0;
+            color: #374151;
+            font-size: 0.95em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-items {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
 
         .badge {
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            padding: 6px 10px;
-            border-radius: 999px;
-            font-size: 0.9em;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 0.875em;
             font-weight: 600;
-            border: 1px solid #e1e5e9;
-            background: #f8f9fa;
-            color: #333;
-            width: fit-content;
+            border: 1px solid transparent;
+            background: white;
+            color: #374151;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: all 0.2s ease;
+            width: 100%;
+            justify-content: flex-start;
         }
 
-        .dot { width: 10px; height: 10px; border-radius: 50%; }
+        .badge:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 8px rgba(0,0,0,0.15);
+        }
+
+        .dot { 
+            width: 8px; 
+            height: 8px; 
+            border-radius: 50%; 
+            flex-shrink: 0;
+        }
+        
         .ok { background: #16a34a; }
         .degraded { background: #f59e0b; }
         .down { background: #dc2626; }
+        
+        .badge.ok-status {
+            border-left: 4px solid #16a34a;
+        }
+        
+        .badge.down-status {
+            border-left: 4px solid #dc2626;
+        }
+        
+        .badge.database {
+            border-left: 4px solid #3b82f6;
+        }
+        
+        .badge.database .dot.ok {
+            background: #3b82f6;
+        }
 
         .info-box li {
             margin-bottom: 5px;
@@ -272,7 +358,7 @@
             transform: rotate(45deg);
         }
 
-        @media (max-width: 600px) {
+        @media (max-width: 768px) {
             .container {
                 padding: 20px;
             }
@@ -283,6 +369,43 @@
             
             .checkbox-group {
                 gap: 12px;
+            }
+
+            .status-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .overall-status {
+                font-size: 1em;
+                padding: 12px;
+            }
+
+            .status-category {
+                padding: 12px;
+            }
+
+            .badge {
+                font-size: 0.8em;
+                padding: 8px 12px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                padding: 15px;
+                margin: 10px;
+            }
+            
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .status-category h4 {
+                font-size: 0.85em;
+            }
+
+            .overall-status {
+                font-size: 0.95em;
             }
         }
     </style>
@@ -295,11 +418,12 @@
         </div>
 
         <div class="info-box">
-            <h3>📋 Supported Networks & Protocols</h3>
+            <h3>📋 System Status & Supported Networks</h3>
             <div id="healthPanel" class="health" aria-live="polite"></div>
             <ul>
                 <li><strong>Flare Network:</strong> Native staking, delegation to FTSO providers</li>
                 <li><strong>Arbitrum:</strong> Aave V3, OpenOcean, SparkDEX V3, Kinetic Market</li>
+                <li><strong>Database:</strong> PostgreSQL for persistent transaction storage and analytics</li>
                 <li><strong>Export Format:</strong> CoinTracking.info compatible CSV</li>
             </ul>
         </div>
@@ -657,37 +781,97 @@
 
         function renderHealth(data) {
             const checks = data.checks || {};
-            const items = [];
 
-            function badge(label, ok, latency) {
+            function badge(label, ok, latency, additionalInfo, cssClass = '') {
                 const state = ok ? 'OK' : 'DOWN';
                 const cls = ok ? 'ok' : 'down';
-                const lat = (latency || latency === 0) ? `${latency} ms` : 'n/a';
-                return `<span class="badge"><span class="dot ${cls}"></span>${label}: ${state} (${lat})</span>`;
+                const lat = (latency || latency === 0) ? `${latency}ms` : 'n/a';
+                const info = additionalInfo ? ` - ${additionalInfo}` : '';
+                const statusClass = ok ? 'ok-status' : 'down-status';
+                const badgeClass = cssClass ? `badge ${cssClass}` : `badge ${statusClass}`;
+                return `<div class="${badgeClass}">
+                    <span class="dot ${cls}"></span>
+                    <span>${label}: <strong>${state}</strong> (${lat}${info})</span>
+                </div>`;
             }
 
             const arb = checks.arbitrum || { explorer: {}, rpc: {} };
-            items.push(badge('Arbitrum Explorer', !!arb.explorer.ok, arb.explorer.latency_ms));
-            items.push(badge('Arbitrum RPC', !!arb.rpc.ok, arb.rpc.latency_ms));
-
             const flr = checks.flare || { explorer: {}, rpc: {} };
-            items.push(badge('Flare Explorer', !!flr.explorer.ok, flr.explorer.latency_ms));
-            items.push(badge('Flare RPC', !!flr.rpc.ok, flr.rpc.latency_ms));
+            const db = checks.database || {};
 
+            // Overall status
             const overallCls = data.status === 'ok' ? 'ok' : 'degraded';
-            const overallText = data.status === 'ok' ? 'ALL GOOD' : 'DEGRADED';
-            items.unshift(`<span class="badge"><span class="dot ${overallCls}"></span>Overall: ${overallText}</span>`);
+            const overallText = data.status === 'ok' ? '✅ ALL SYSTEMS OPERATIONAL' : '⚠️ SYSTEM ISSUES DETECTED';
+            
+            let html = `
+                <div class="overall-status ${overallCls}">
+                    ${overallText}
+                </div>
+                <div class="status-grid">
+                    <div class="status-category">
+                        <h4>🌐 Blockchain Networks</h4>
+                        <div class="status-items">
+                            ${badge('Arbitrum Explorer', !!arb.explorer.ok, arb.explorer.latency_ms)}
+                            ${badge('Arbitrum RPC', !!arb.rpc.ok, arb.rpc.latency_ms)}
+                            ${badge('Flare Explorer', !!flr.explorer.ok, flr.explorer.latency_ms)}
+                            ${badge('Flare RPC', !!flr.rpc.ok, flr.rpc.latency_ms)}
+                        </div>
+                    </div>`;
 
-            healthPanel.innerHTML = items.join(' ');
+            // Add Database section if available
+            if (db.hasOwnProperty('ok')) {
+                const dbVersion = db.version ? `v${db.version}` : '';
+                const poolInfo = db.connection_pool_size ? `Pool: ${db.connection_pool_size}` : '';
+                const additionalInfo = [dbVersion, poolInfo].filter(Boolean).join(', ');
+                
+                html += `
+                    <div class="status-category">
+                        <h4>💾 Database</h4>
+                        <div class="status-items">
+                            ${badge('PostgreSQL', !!db.ok, db.latency_ms, additionalInfo, 'database')}
+                        </div>
+                    </div>`;
+            }
+
+            html += `</div>`;
+            healthPanel.innerHTML = html;
         }
 
         async function fetchHealth() {
             try {
                 const res = await fetch('/health', { cache: 'no-store' });
+                if (!res.ok) {
+                    throw new Error(`Health check failed: ${res.status}`);
+                }
                 const data = await res.json();
                 renderHealth(data);
             } catch (e) {
-                healthPanel.innerHTML = '<span class="badge"><span class="dot down"></span>Health: DOWN</span>';
+                console.warn('Health check failed:', e);
+                healthPanel.innerHTML = `
+                    <div class="overall-status degraded">
+                        ❌ SYSTEM CONNECTION FAILED
+                    </div>
+                    <div class="status-grid">
+                        <div class="status-category">
+                            <h4>🌐 Blockchain Networks</h4>
+                            <div class="status-items">
+                                <div class="badge down-status">
+                                    <span class="dot down"></span>
+                                    <span>All Networks: <strong>UNKNOWN</strong></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="status-category">
+                            <h4>💾 Database</h4>
+                            <div class="status-items">
+                                <div class="badge database">
+                                    <span class="dot down"></span>
+                                    <span>PostgreSQL: <strong>UNKNOWN</strong></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
             }
         }
 
